@@ -216,12 +216,6 @@ jobs:
       - name: Put binaries into release root
         run: cp Artifacts/幻神引擎-*/* .
 
-      - name: Download wiki
-        run: |
-          git clone https://github.com/official-pikafish/Pikafish.wiki.git Wiki
-          cd Wiki
-          rm -rf .git
-
       # Artifacts automatically get zipped.
       # To avoid double-zipping, we use the unzipped directory
       - uses: actions/upload-artifact@v7
@@ -229,49 +223,3 @@ jobs:
           name: 幻神引擎
           path: |
             幻神引擎-*
-            Wiki
-            AUTHORS
-            CONTRIBUTING.md
-            Copying.txt
-            README.md
-            Top CPU Contributors.txt
-
-  Pikafish-release:
-    name: Create draft release
-    runs-on: ubuntu-latest
-    needs: [Pikafish]
-    # Only Pikafish-* tags create a release; branch pushes stop after the build.
-    if: startsWith(github.ref, 'refs/tags/Pikafish-')
-    permissions:
-      contents: write
-
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: 幻神引擎
-          path: release
-
-      - name: Install 7-Zip
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full
-
-      - name: Package release archive
-        run: |
-          VERSION="${GITHUB_REF_NAME#Pikafish-}"
-          (cd release && 7z a "../幻神引擎.${VERSION}.7z" ./*)
-
-      - name: Create draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#Pikafish-}"
-          if gh release view "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" "幻神引擎.${VERSION}.7z" \
-              --repo "${{ github.repository }}" --clobber
-          else
-            gh release create "${GITHUB_REF_NAME}" \
-              --repo "${{ github.repository }}" \
-              --draft \
-              --title "幻神引擎 ${VERSION}" \
-              --generate-notes \
-              "幻神引擎.${VERSION}.7z"
-          fi
