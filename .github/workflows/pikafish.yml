@@ -1,0 +1,277 @@
+name: Pikafish
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'Pikafish-*'
+
+jobs:
+  Pikafish-x86-64:
+    name: ${{ matrix.config.name }}-x86-64-universal
+    runs-on: ${{ matrix.config.os }}
+    env:
+      ARCH: x86-64-universal
+      COMP: clang
+      # Released file name. The build itself uses an ASCII name (pikafish-build*)
+      # so that make, Intel SDE and the PGO bench never see a non-ASCII path.
+      EXE: 幻神引擎-${{ matrix.config.name }}-x86-64-universal${{ matrix.config.ext }}
+      # (not shipped); Windows embeds pikafish.nnue + pikafish_zero_test.nnue in
+      # the binary (Makefile embed=yes, the default for Windows), like Android.
+      NET_REPO: ${{ vars.NET_REPO }}
+      NET_TAG: ${{ vars.NET_TAG }}
+      NET_SHA256: ${{ vars.NET_SHA256 }}
+    strategy:
+      matrix:
+        config:
+          - name: Windows
+            os: windows-latest
+            shell: msys2 {0}
+            ext: .exe
+    defaults:
+      run:
+        working-directory: src
+        shell: ${{ matrix.config.shell }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download private networks
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.NET_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ] || [ -z "$NET_REPO" ] || [ -z "$NET_TAG" ]; then
+            echo "::error::NET_TOKEN secret, NET_REPO and NET_TAG variables are required for the PGO build."
+            exit 1
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            NETS="pikafish.nnue pikafish_zero_test.nnue"   # embedded in the binary
+          else
+            NETS="pikafish.nnue"                           # PGO training run only
+          fi
+          gh release download "$NET_TAG" --repo "$NET_REPO" \
+            $(for n in $NETS; do printf -- '--pattern %s ' "$n"; done) --dir . --clobber
+          if [ -n "$NET_SHA256" ]; then
+            echo "$NET_SHA256  pikafish.nnue" | sha256sum -c -
+          fi
+          ls -l $NETS
+
+      - name: Setup msys and install required packages
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: clang64
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-llvm-tools
+            mingw-w64-clang-x86_64-compiler-rt
+            make git
+
+      - name: Set up LLVM
+        if: runner.os == 'Linux'
+        run: |
+          LLVM_VERSION=22
+          curl -s https://apt.llvm.org/llvm.sh | sudo bash -s -- $LLVM_VERSION
+          sudo apt install -y libc++-$LLVM_VERSION-dev libc++abi-$LLVM_VERSION-dev libunwind-$LLVM_VERSION-dev \
+                              libclang-rt-$LLVM_VERSION-dev llvm-$LLVM_VERSION
+          # CXXFLAGS/LDFLAGS (not EXTRA*) so that the PGO sub-makes keep libc++
+          echo "CXXFLAGS=-stdlib=libc++" >> $GITHUB_ENV
+          echo "LDFLAGS=-stdlib=libc++" >> $GITHUB_ENV
+          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> $GITHUB_PATH
+
+      # GitHub-hosted x86 runners lack AVX-VNNI / AVX-512, so every slice's PGO
+      # bench runs under Intel SDE.
+      - name: Setup Intel SDE
+        uses: petarpetrovt/setup-sde@v6.0
+
+      - name: Compile universal PGO build
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            SDE="$(cygpath -u "$SDE_PATH")/sde.exe"
+          else
+            SDE="$SDE_PATH/sde64"
+          fi
+          BUILD=pikafish-build${{ matrix.config.ext }}
+          make -j4 profile-build EXE=$BUILD RUN_PREFIX="$SDE -future --"
+          make strip EXE=$BUILD
+          cp "$BUILD" "../$EXE"
+
+      - name: Remove private networks
+        if: always()
+        shell: bash
+        run: rm -rf pikafish.nnue pikafish_zero_test.nnue temp_builds
+
+      # Artifacts automatically get zipped.
+      # To avoid double-zipping, we use the unzipped directory
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.EXE }}
+          path: ${{ env.EXE }}
+
+  Pikafish-Android:
+    name: Android-${{ matrix.config.arch }}-universal
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        config:
+          # The PGO bench of an Android binary runs on the Linux runner: static
+          # bionic executables run directly on a Linux kernel. arm64 slices run
+          # under QEMU user mode, x86-64 slices under Intel SDE (the runner lacks
+          # AVX-VNNI / AVX-512).
+          - arch: arm64
+            runner: qemu
+          - arch: x86-64
+            runner: sde
+    env:
+      ARCH: ${{ matrix.config.arch }}-universal
+      COMP: ndk
+      EXE: 幻神引擎-Android-${{ matrix.config.arch }}-universal
+      LDFLAGS: "-static -Wno-unused-command-line-argument"
+      NET_REPO: ${{ vars.NET_REPO }}
+      NET_TAG: ${{ vars.NET_TAG }}
+      NET_SHA256: ${{ vars.NET_SHA256 }}
+    defaults:
+      run:
+        working-directory: src
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Android embeds both nets in the binary (Makefile embed=yes, the default
+      # for COMP=ndk), so both files must be present at compile time.
+      - name: Download private networks (embedded in the Android binary)
+        env:
+          GH_TOKEN: ${{ secrets.NET_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ] || [ -z "$NET_REPO" ] || [ -z "$NET_TAG" ]; then
+            echo "::error::NET_TOKEN secret, NET_REPO and NET_TAG variables are required for the Android build."
+            exit 1
+          fi
+          gh release download "$NET_TAG" --repo "$NET_REPO" \
+            --pattern pikafish.nnue --pattern pikafish_zero_test.nnue --dir . --clobber
+          if [ -n "$NET_SHA256" ]; then
+            echo "$NET_SHA256  pikafish.nnue" | sha256sum -c -
+          fi
+          ls -l pikafish.nnue pikafish_zero_test.nnue
+
+      - name: Install NDK
+        run: |
+          NDKV="28.2.13676358"
+          ANDROID_ROOT=/usr/local/lib/android
+          ANDROID_SDK_ROOT=$ANDROID_ROOT/sdk
+          SDKMANAGER=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager
+          echo "y" | $SDKMANAGER "ndk;$NDKV"
+          ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDKV
+          ANDROID_NDK_BIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+          echo "ANDROID_NDK_BIN=$ANDROID_NDK_BIN" >> $GITHUB_ENV
+
+      - name: Install QEMU user mode
+        if: matrix.config.runner == 'qemu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+
+      - name: Setup Intel SDE
+        if: matrix.config.runner == 'sde'
+        uses: petarpetrovt/setup-sde@v6.0
+
+      - name: Compile universal PGO build
+        run: |
+          export PATH=${{ env.ANDROID_NDK_BIN }}:$PATH
+          if [ "${{ matrix.config.runner }}" = "qemu" ]; then
+            PREFIX="qemu-aarch64 -cpu max"
+          else
+            PREFIX="$SDE_PATH/sde64 -future --"
+          fi
+          make -j4 profile-build EXE=pikafish-build RUN_PREFIX="$PREFIX"
+          make strip EXE=pikafish-build
+          cp pikafish-build "../$EXE"
+
+      - name: Remove private networks
+        if: always()
+        run: rm -rf pikafish.nnue pikafish_zero_test.nnue temp_builds
+
+      # Artifacts automatically get zipped.
+      # To avoid double-zipping, we use the unzipped directory
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.EXE }}
+          path: ${{ env.EXE }}
+
+  Pikafish:
+    name: Pikafish
+    runs-on: ubuntu-slim
+    needs: [Pikafish-x86-64, Pikafish-Android]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: 幻神引擎-*
+          path: Artifacts
+
+      - name: Put binaries into release root
+        run: cp Artifacts/幻神引擎-*/* .
+
+      - name: Download wiki
+        run: |
+          git clone https://github.com/official-pikafish/Pikafish.wiki.git Wiki
+          cd Wiki
+          rm -rf .git
+
+      # Artifacts automatically get zipped.
+      # To avoid double-zipping, we use the unzipped directory
+      - uses: actions/upload-artifact@v7
+        with:
+          name: 幻神引擎
+          path: |
+            幻神引擎-*
+            Wiki
+            AUTHORS
+            CONTRIBUTING.md
+            Copying.txt
+            README.md
+            Top CPU Contributors.txt
+
+  Pikafish-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    needs: [Pikafish]
+    # Only Pikafish-* tags create a release; branch pushes stop after the build.
+    if: startsWith(github.ref, 'refs/tags/Pikafish-')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: 幻神引擎
+          path: release
+
+      - name: Install 7-Zip
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      - name: Package release archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#Pikafish-}"
+          (cd release && 7z a "../幻神引擎.${VERSION}.7z" ./*)
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#Pikafish-}"
+          if gh release view "${GITHUB_REF_NAME}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "幻神引擎.${VERSION}.7z" \
+              --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${{ github.repository }}" \
+              --draft \
+              --title "幻神引擎 ${VERSION}" \
+              --generate-notes \
+              "幻神引擎.${VERSION}.7z"
+          fi
