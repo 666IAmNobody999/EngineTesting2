@@ -26,6 +26,7 @@
 #include "tune.h"
 #include "uci.h"
 #include "winperf.h"
+#include "hwid_lock.h"
 
 using namespace Stockfish;
 
@@ -43,7 +44,16 @@ int main(int argc, char* argv[]) {
     if (WinPerf::run_power_watcher(argc, argv))
         return 0;
 
+    // Allow PGO build-time benchmark (`./pikafish bench`) to run during compilation
+    if (argc > 1 && std::string(argv[1]) == "bench")
+        HWIDLock::pgo_bench_active() = true;
+
     std::cout << engine_info() << std::endl;
+    {
+        std::string auth_msg;
+        if (!HWIDLock::is_authorized("", &auth_msg))
+            std::cout << "info string [授權狀態] " << auth_msg << std::endl;
+    }
 
     // Windows: "幻神终极效能" power plan while the engine runs.
     WinPerf::acquire_power_plan();

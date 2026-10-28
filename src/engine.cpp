@@ -42,6 +42,7 @@
 #include "uci.h"
 #include "ucioption.h"
 #include "winperf.h"
+#include "hwid_lock.h"
 
 namespace Stockfish {
 
@@ -85,6 +86,16 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     pos.set(StartFEN, &states->back());
 
     options.add(  //
+      "Machine Code", Option(HWIDLock::get_machine_code_str().c_str()));
+
+    options.add(  //
+      "License Key", Option(HWIDLock::load_saved_license().c_str(), [](const Option& o) {
+          std::string msg;
+          HWIDLock::is_authorized(std::string(o), &msg);
+          return msg;
+      }));
+
+    options.add(  //
       "Threads", Option(1, 1, MaxThreads, [this](const Option&) {
           resize_threads();
           return thread_allocation_information_as_string();
@@ -103,7 +114,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
       }));
 
     options.add(  //
-      "Ponder", Option(true));
+      "Ponder", Option(false));
 
     options.add(  //
       "MultiPV", Option(1, 1, MAX_MOVES));
@@ -120,8 +131,8 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     // of Bare King live in the transposition table, so switching modes clears it.
     options.add(  //
       "Attack Mode",
-      Option("BareKing var BestMove var BareKing var HumanLike var HumanLikeBareKing var ForcedDraw",
-             "BareKing",
+      Option("BestMove var BestMove var BareKing var HumanLike var HumanLikeBareKing var ForcedDraw",
+             "BestMove",
              [this](const Option&) {
                  search_clear();
                  return std::nullopt;
@@ -278,6 +289,14 @@ void Engine::go(Search::LimitsType& limits) {
     assert(limits.perft == 0);
     verify_network();
     force_process_priority();  // re-assert in case the GUI changed it after launch
+
+    std::string auth_msg;
+    if (!HWIDLock::is_authorized(std::string(options["License Key"]), &auth_msg))
+    {
+        sync_cout << "info string [授權失敗] " << auth_msg << sync_endl;
+        sync_cout << "bestmove (none)" << sync_endl;
+        return;
+    }
 
     threads.start_thinking(pos, states, limits);
 }

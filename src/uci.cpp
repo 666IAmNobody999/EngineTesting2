@@ -177,12 +177,9 @@ void UCIEngine::loop() {
         }
         else if (token == "--help" || token == "help" || token == "--license" || token == "license")
             sync_cout
-              << "\n\u5E7B\u795E\u5F15\u64CE (based on Pikafish) is a powerful xiangqi engine for playing and analyzing."
-                 "\nIt is released as free software licensed under the GNU GPLv3 License."
+              << "\n幻神引擎 (based on Pikafish) is a powerful xiangqi engine for playing and analyzing."
                  "\nIt is normally used with a graphical user interface (GUI) and implements"
                  "\nthe Universal Chess Interface (UCI) protocol to communicate with a GUI, an API, etc."
-                 "\nFor any further information, visit https://github.com/official-pikafish/Pikafish#readme"
-                 "\nor read the corresponding README.md and Copying.txt files distributed along with this program.\n"
               << sync_endl;
         else if (!token.empty() && token[0] != '#')
             sync_cout << "Unknown command: '" << cmd << "'. Type help for more information."
