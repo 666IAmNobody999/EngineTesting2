@@ -44,6 +44,9 @@ int main(int argc, char* argv[]) {
     if (WinPerf::run_power_watcher(argc, argv))
         return 0;
 
+    // Switch Windows console to UTF-8 BEFORE printing any Chinese text to prevent garbled characters
+    set_console_utf8();
+
     // Allow PGO build-time benchmark (`./pikafish bench`) to run during compilation
     if (argc > 1 && std::string(argv[1]) == "bench")
         HWIDLock::pgo_bench_active() = true;
@@ -51,8 +54,8 @@ int main(int argc, char* argv[]) {
     std::cout << engine_info() << std::endl;
     {
         std::string auth_msg;
-        if (!HWIDLock::is_authorized("", &auth_msg))
-            std::cout << "info string [授權狀態] " << auth_msg << std::endl;
+        if (!HWIDLock::is_authorized("", &auth_msg, true))
+            std::cout << "info string [授权状态] " << auth_msg << std::endl;
     }
 
     // Windows: "幻神终极效能" power plan while the engine runs.

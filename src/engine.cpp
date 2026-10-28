@@ -293,7 +293,7 @@ void Engine::go(Search::LimitsType& limits) {
     std::string auth_msg;
     if (!HWIDLock::is_authorized(std::string(options["License Key"]), &auth_msg))
     {
-        sync_cout << "info string [授權失敗] " << auth_msg << sync_endl;
+        sync_cout << "info string [授权失败] " << auth_msg << sync_endl;
         sync_cout << "bestmove (none)" << sync_endl;
         return;
     }

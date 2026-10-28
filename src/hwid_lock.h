@@ -1,6 +1,6 @@
 /*
-  One-Machine-One-Code (一機一碼) Hardware Fingerprint Authorization System
-  For 幻神引擎 (EngineProject-Testing)
+  One-Machine-One-Code (一机一码) Hardware Fingerprint Authorization System
+  For 幻神引擎 (Commercial Edition with Native Popup & Auto-Clipboard)
 */
 
 #ifndef HWID_LOCK_H_INCLUDED
@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -273,25 +274,135 @@ inline void save_license_key(const std::string& key_str) {
 #endif
 }
 
-// Write machine code helper txt file when unauthorized
+// Write machine code helper txt file (with UTF-8 BOM so Windows Notepad never garbles)
 inline void write_machine_code_file() {
     std::string           mcode    = get_machine_code_str();
     std::filesystem::path txt_file = get_exe_dir() / "machine_code.txt";
-    std::ofstream         out(txt_file, std::ios::trunc);
+    std::ofstream         out(txt_file, std::ios::binary | std::ios::trunc);
     if (out.is_open())
     {
-        out << "========================================\n"
-            << "  幻神引擎 (一機一碼授權系統)\n"
-            << "========================================\n"
-            << "您的專屬機器碼 (Machine Code):\n\n"
-            << "    " << mcode << "\n\n"
-            << "請將上方機器碼複製發給作者以獲取授權碼 (License Key)。\n"
-            << "獲取授權碼後，您可以：\n"
-            << "1. 在象棋介面 (GUI) 引擎參數的 [License Key] 欄位填入授權碼；或\n"
-            << "2. 將授權碼存入與引擎同目錄下的 license.key 檔案中。\n";
+        // Write UTF-8 BOM
+        const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+        out.write(reinterpret_cast<const char*>(bom), sizeof(bom));
+        out << "========================================\r\n"
+            << "  幻神引擎 (一机一码授权系统)\r\n"
+            << "========================================\r\n"
+            << "您的专属机器码 (Machine Code):\r\n\r\n"
+            << "    " << mcode << "\r\n\r\n"
+            << "请将上方机器码複製发给作者以获取授权码 (License Key)。\r\n"
+            << "获取授权码后，您可以：\r\n"
+            << "1. 在象棋介面 (GUI) 引擎参数的 [License Key] 栏位填入授权码；或\r\n"
+            << "2. 将授权码存入与引擎同目录下的 license.key 档案中。\r\n";
         out.close();
     }
 }
+
+#if defined(_WIN32)
+// Dynamically resolve user32.dll functions so no extra linker flags (-luser32) are required
+template<typename F>
+inline F load_win_fn(const wchar_t* dll, const char* name) {
+    HMODULE mod = GetModuleHandleW(dll);
+    if (!mod)
+        mod = LoadLibraryW(dll);
+    F       fn   = nullptr;
+    FARPROC proc = mod ? GetProcAddress(mod, name) : nullptr;
+    if (proc)
+        std::memcpy(&fn, &proc, sizeof(fn));
+    return fn;
+}
+
+// Copy ASCII string to Windows Clipboard automatically
+inline bool copy_to_windows_clipboard(const std::string& text) {
+    using OpenClipboardFn    = BOOL(WINAPI*)(HWND);
+    using EmptyClipboardFn   = BOOL(WINAPI*)();
+    using SetClipboardDataFn = HANDLE(WINAPI*)(UINT, HANDLE);
+    using CloseClipboardFn   = BOOL(WINAPI*)();
+
+    auto pOpenClipboard    = load_win_fn<OpenClipboardFn>(L"user32.dll", "OpenClipboard");
+    auto pEmptyClipboard   = load_win_fn<EmptyClipboardFn>(L"user32.dll", "EmptyClipboard");
+    auto pSetClipboardData = load_win_fn<SetClipboardDataFn>(L"user32.dll", "SetClipboardData");
+    auto pCloseClipboard   = load_win_fn<CloseClipboardFn>(L"user32.dll", "CloseClipboard");
+
+    if (!pOpenClipboard || !pEmptyClipboard || !pSetClipboardData || !pCloseClipboard)
+        return false;
+
+    if (!pOpenClipboard(nullptr))
+        return false;
+
+    pEmptyClipboard();
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, text.size() + 1);
+    if (!hMem)
+    {
+        pCloseClipboard();
+        return false;
+    }
+
+    void* ptr = GlobalLock(hMem);
+    if (ptr)
+    {
+        std::memcpy(ptr, text.c_str(), text.size() + 1);
+        GlobalUnlock(hMem);
+    }
+
+    constexpr UINT kCF_TEXT = 1;
+    if (!pSetClipboardData(kCF_TEXT, hMem))
+    {
+        GlobalFree(hMem);
+        pCloseClipboard();
+        return false;
+    }
+
+    pCloseClipboard();
+    return true;
+}
+
+// Show a native UTF-16 Windows popup dialog (100% immune to console codepage garbling)
+// Returns true if user clicked Yes/OK
+inline void show_unauthorized_popup() {
+    static bool popup_shown = false;
+    if (popup_shown)
+        return;
+    popup_shown = true;
+
+    std::string mcode  = get_machine_code_str();
+    bool        copied = copy_to_windows_clipboard(mcode);
+
+    using MessageBoxWFn = int(WINAPI*)(HWND, LPCWSTR, LPCWSTR, UINT);
+    auto pMessageBoxW   = load_win_fn<MessageBoxWFn>(L"user32.dll", "MessageBoxW");
+    if (!pMessageBoxW)
+        return;
+
+    std::wstring wcode(mcode.begin(), mcode.end());
+
+    std::wstring title = L"幻神引擎 - 一机一码授权提示";
+    std::wstring body  = L"【幻神引擎尚未授权，或授权码无效 / 已过期】\n\n"
+                       + std::wstring(L"您的本机专属机器码 (Machine Code)：\n")
+                       + L"👉  " + wcode + L"\n\n";
+
+    if (copied)
+    {
+        body += L"✅ 系统已自动将您的机器码複製到剪贴簿！\n"
+                L"您现在可以直接在微信 / QQ 按 Ctrl+V 贴上并发送给作者。\n\n";
+    }
+    else
+    {
+        body += L"（点击「确定」后可再次複製机器码，或打开同目录下的 machine_code.txt 查看）\n\n";
+    }
+
+    body += L"【激活方式】\n"
+            L"1. 将作者提供的 license.key 放入引擎同资料夹；或\n"
+            L"2. 在象棋介面 (GUI) 引擎参数的 [License Key] 栏位贴上授权码。";
+
+    // MB_OK (0x00) | MB_ICONINFORMATION (0x40) | MB_SETFOREGROUND (0x10000) | MB_TOPMOST (0x40000)
+    constexpr UINT flags = 0x00000000U | 0x00000040U | 0x00010000U | 0x00040000U;
+    pMessageBoxW(nullptr, body.c_str(), title.c_str(), flags);
+
+    // Ensure clipboard still holds the machine code after clicking OK
+    copy_to_windows_clipboard(mcode);
+}
+#else
+inline void show_unauthorized_popup() {}
+#endif
 
 // Verify a license key string against current machine HWID and current date
 inline bool verify_license_key(const std::string& raw_key, std::string* status_msg = nullptr) {
@@ -299,7 +410,7 @@ inline bool verify_license_key(const std::string& raw_key, std::string* status_m
     if (cleaned.size() != 24)
     {
         if (status_msg)
-            *status_msg = "未授權 (本機機器碼: " + get_machine_code_str() + ")";
+            *status_msg = "未授权 (本机机器码: " + get_machine_code_str() + ")";
         return false;
     }
 
@@ -321,7 +432,7 @@ inline bool verify_license_key(const std::string& raw_key, std::string* status_m
     if (sig != expected_sig)
     {
         if (status_msg)
-            *status_msg = "授權碼無效或非本機專用! 本機機器碼: " + get_machine_code_str();
+            *status_msg = "授权码无效或非本机专用! 本机机器码: " + get_machine_code_str();
         return false;
     }
 
@@ -332,17 +443,17 @@ inline bool verify_license_key(const std::string& raw_key, std::string* status_m
         if (today > exp_date)
         {
             if (status_msg)
-                *status_msg = "授權已過期 (到期日: " + std::to_string(exp_date)
-                            + ")! 本機機器碼: " + get_machine_code_str();
+                *status_msg = "授权已过期 (到期日: " + std::to_string(exp_date)
+                            + ")! 本机机器码: " + get_machine_code_str();
             return false;
         }
         if (status_msg)
-            *status_msg = "已授權 (有效至: " + std::to_string(exp_date) + ")";
+            *status_msg = "已授权 (有效至: " + std::to_string(exp_date) + ")";
     }
     else
     {
         if (status_msg)
-            *status_msg = "已授權 (永久綁定本機)";
+            *status_msg = "已授权 (永久绑定本机)";
     }
 
     return true;
@@ -355,7 +466,9 @@ inline bool& pgo_bench_active() {
 }
 
 // Global authorization state check (checks current option value + saved file/registry)
-inline bool is_authorized(const std::string& option_key = "", std::string* msg = nullptr) {
+inline bool is_authorized(const std::string& option_key  = "",
+                          std::string*       msg         = nullptr,
+                          bool               allow_popup = true) {
     if (pgo_bench_active())
         return true;
 
@@ -377,8 +490,12 @@ inline bool is_authorized(const std::string& option_key = "", std::string* msg =
 
     write_machine_code_file();
     if (msg)
-        *msg = "未授權! 本機機器碼: " + get_machine_code_str()
-             + " (已生成 machine_code.txt，請聯繫作者獲取授權碼)";
+        *msg = "未授权! 本机机器码: " + get_machine_code_str()
+             + " (机器码已自动複製到剪贴簿，并已生成 machine_code.txt)";
+
+    if (allow_popup)
+        show_unauthorized_popup();
+
     return false;
 }
 
