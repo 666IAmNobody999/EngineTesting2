@@ -127,6 +127,13 @@ void UCIEngine::loop() {
 
             sync_cout << "uciok" << sync_endl;
         }
+		
+        else if (token == "ucci")
+        {
+            sync_cout << "id name " << engine_info(true) << "\n"
+                      << engine.get_options() << "\n"
+                      << "ucciok" << sync_endl;
+        }
 
         else if (token == "setoption")
             setoption(is);
@@ -139,7 +146,21 @@ void UCIEngine::loop() {
         }
         else if (token == "position")
             position(is);
-        else if (token == "ucinewgame")
+        else if (token == "fen")
+        {
+            std::string rest;
+            std::getline(is, rest);
+            if (rest.find('/') != std::string::npos || rest.find("startpos") != std::string::npos)
+            {
+                std::istringstream fen_is("fen " + rest);
+                position(fen_is);
+            }
+            else
+            {
+                sync_cout << "position fen " << engine.fen() << sync_endl;
+            }
+        }
+        else if (token == "ucinewgame" || token == "uccinewgame")
             engine.search_clear();
         else if (token == "isready")
         {
@@ -161,6 +182,8 @@ void UCIEngine::loop() {
             benchmark(is);
         else if (token == "d")
             sync_cout << engine.visualize() << sync_endl;
+        else if (token == "getfen")
+            sync_cout << "position fen " << engine.fen() << sync_endl;
         else if (token == "eval")
             engine.trace_eval();
         else if (token == "compiler")
@@ -504,8 +527,17 @@ void UCIEngine::position(std::istringstream& is) {
         is >> token;  // Consume the "moves" token, if any
     }
     else if (token == "fen")
+    {
         while (is >> token && token != "moves")
             fen += token + " ";
+    }
+    // 新增：如果介面发送 "position rnbakabnr/..." (漏了 "fen" 关键字)，自动补齐读取
+    else if (token.find('/') != std::string::npos)
+    {
+        fen = token + " ";
+        while (is >> token && token != "moves")
+            fen += token + " ";
+    }
     else
         return;
 
