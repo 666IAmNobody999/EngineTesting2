@@ -89,6 +89,9 @@ class OptionsMap {
 
     usize count(const std::string&) const;
 
+    // Print options in UCCI format ("option <name> type ..."), names with spaces use '_'
+    std::string to_ucci_string() const;
+
    private:
     friend class Engine;
     friend class Option;

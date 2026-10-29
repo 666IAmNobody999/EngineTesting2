@@ -60,6 +60,11 @@ class UCIEngine {
 
     static inline ScoreTypeMode scoreTypeMode = ScoreTypeMode::WinRate;
 
+    // UCCI 兼容: GUI 发 "ucci" 握手后进入 UCCI 模式。
+    // UCCI 的 go 时间默认以「秒」为单位, GUI 发 "setoption usemillisec true" 后改为毫秒。
+    static inline bool ucciMode    = false;
+    static inline bool useMillisec = false;
+
     Search::LimitsType parse_limits(std::istream& is);
 
     auto& engine_options() { return engine.get_options(); }
@@ -76,6 +81,7 @@ class UCIEngine {
     void benchmark(std::istream& args);
     void position(std::istringstream& is);
     void setoption(std::istringstream& is);
+    void setoption_ucci(const std::string& name, const std::string& value);
     u64  perft(const Search::LimitsType&);
 
     static void on_update_no_moves(const Engine::InfoShort& info);

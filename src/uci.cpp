@@ -111,7 +111,14 @@ void UCIEngine::loop() {
         is >> token;
 
         if (token == "quit" || token == "stop")
+        {
             engine.stop();
+            if (token == "quit" && ucciMode)
+            {
+                engine.wait_for_search_finished();
+                sync_cout << "bye" << sync_endl;  // UCCI 规定退出时回应 bye
+            }
+        }
 
         // The GUI sends 'ponderhit' to tell that the user has played the expected move.
         // So, 'ponderhit' is sent if pondering was done on the same move that the user
@@ -122,6 +129,7 @@ void UCIEngine::loop() {
 
         else if (token == "uci")
         {
+            ucciMode = false;
             sync_cout << "id name " << engine_info(true) << "\n"
                       << engine.get_options() << sync_endl;
 
@@ -130,9 +138,18 @@ void UCIEngine::loop() {
 		
         else if (token == "ucci")
         {
+            // 进入 UCCI 模式: 之后的 setoption / go 都按 UCCI 语法解析。
+            // 之前这里只回应了 ucciok, 但仍按 UCI 解析 "setoption threads 6"
+            // 与 "go time ..." , 导致线程数设定失效、步时被忽略变成无限思考。
+            ucciMode    = true;
+            useMillisec = false;
             sync_cout << "id name " << engine_info(true) << "\n"
-                      << engine.get_options() << "\n"
+                      << engine.get_options().to_ucci_string() << "\n"
                       << "ucciok" << sync_endl;
+        }
+        else if (token == "banmoves" || token == "probe")
+        {
+            // UCCI 指令, 暂不支持, 静默忽略
         }
 
         else if (token == "setoption")
@@ -217,6 +234,24 @@ Search::LimitsType UCIEngine::parse_limits(std::istream& is) {
 
     limits.startTime = now();  // The search starts as early as possible
 
+    // UCCI 的 time/increment/opptime/oppincrement 指的是「走子方 / 对方」,
+    // 需要按当前局面的走子方换成红(WHITE)/黑(BLACK)。
+    auto       fenStr = engine.fen();
+    const auto spPos  = fenStr.find(' ');
+    const bool redToMove =
+      spPos == std::string::npos || spPos + 1 >= fenStr.size() || fenStr[spPos + 1] != 'b';
+    const Color us   = redToMove ? WHITE : BLACK;
+    const Color them = ~us;
+    bool        ucciTime = false;
+
+    // UCCI 时间单位: 默认秒, usemillisec=true 时为毫秒。支持小数 (如 0.5 秒)。
+    auto read_ucci_time = [&](TimePoint& dst) {
+        double v = 0;
+        is >> v;
+        dst      = TimePoint(useMillisec ? v : v * 1000.0);
+        ucciTime = true;
+    };
+
     while (is >> token)
     {
         if (token == "searchmoves")  // Needs to be the last command on the line
@@ -237,7 +272,34 @@ Search::LimitsType UCIEngine::parse_limits(std::istream& is) {
         else if (token == "movestogo")
             is >> limits.movestogo;
         else if (token == "depth")
-            is >> limits.depth;
+        {
+            std::string d;
+            is >> d;
+            if (d == "infinite")  // UCCI: go depth infinite
+                limits.infinite = 1;
+            else
+            {
+                std::istringstream ds(d);
+                if (!(ds >> limits.depth))
+                    is.setstate(std::ios::failbit);
+            }
+        }
+        // ---- UCCI 时间参数 ----
+        else if (token == "time")
+            read_ucci_time(limits.time[us]);
+        else if (token == "opptime")
+            read_ucci_time(limits.time[them]);
+        else if (token == "increment")
+            read_ucci_time(limits.inc[us]);
+        else if (token == "oppincrement")
+            read_ucci_time(limits.inc[them]);
+        else if (token == "oppmovestogo")
+        {
+            int dummy;
+            is >> dummy;
+        }
+        else if (token == "draw")
+            ;  // UCCI: 对方提和, 忽略
         else if (token == "nodes")
             is >> limits.nodes;
         else if (token == "movetime")
@@ -255,12 +317,29 @@ Search::LimitsType UCIEngine::parse_limits(std::istream& is) {
             terminate_on_critical_error("Invalid argument for '" + token + "'");
     }
 
+    // UCCI 只给了自己的时间而没给对方时间时, 视作双方相同, 避免 timeAdvantage 误判
+    if (ucciTime && limits.time[us] && !limits.time[them])
+        limits.time[them] = limits.time[us];
+
     return limits;
 }
 
 void UCIEngine::go(std::istringstream& is) {
 
     Search::LimitsType limits = parse_limits(is);
+
+    // 调试信息: 方便在 GUI 引擎日志里确认步时与线程数是否正确收到
+    {
+        const auto& o = engine.get_options();
+        std::ostringstream ss;
+        ss << "go parsed: threads=" << int(o["Threads"]) << " hash=" << int(o["Hash"])
+           << " wtime=" << limits.time[WHITE] << " btime=" << limits.time[BLACK]
+           << " winc=" << limits.inc[WHITE] << " binc=" << limits.inc[BLACK]
+           << " movestogo=" << limits.movestogo << " movetime=" << limits.movetime
+           << " depth=" << limits.depth << " infinite=" << limits.infinite
+           << " protocol=" << (ucciMode ? (useMillisec ? "UCCI(ms)" : "UCCI(sec)") : "UCI");
+        print_info_string(ss.str());
+    }
 
     if (limits.perft)
         perft(limits);
@@ -503,7 +582,65 @@ void UCIEngine::benchmark(std::istream& args) {
 
 void UCIEngine::setoption(std::istringstream& is) {
     engine.wait_for_search_finished();
-    engine.get_options().setoption(is);
+
+    // UCI : setoption name <id> [value <x>]
+    // UCCI: setoption <id> [<x>]      例如 "setoption threads 6", "setoption usemillisec true"
+    const auto  start = is.tellg();
+    std::string first;
+    is >> first;
+
+    if (first == "name")
+    {
+        is.clear();
+        is.seekg(start);
+        engine.get_options().setoption(is);
+        return;
+    }
+
+    std::string value, token;
+    while (is >> token)
+        value += (value.empty() ? "" : " ") + token;
+
+    setoption_ucci(first, value);
+}
+
+void UCIEngine::setoption_ucci(const std::string& rawName, const std::string& rawValue) {
+    std::string name  = rawName;
+    std::string value = rawValue;
+    std::replace(name.begin(), name.end(), '_', ' ');
+    const std::string lname = to_lower(name);
+
+    // UCCI 布尔值可能是 on/off
+    if (to_lower(value) == "on")
+        value = "true";
+    else if (to_lower(value) == "off")
+        value = "false";
+
+    if (lname == "usemillisec")
+    {
+        useMillisec = to_lower(value) != "false";
+        return;
+    }
+    if (lname == "newgame")
+    {
+        engine.search_clear();
+        return;
+    }
+
+    if (lname == "hashsize")
+        name = "Hash";
+    else if (lname == "threads")
+        name = "Threads";
+    else if (lname == "ponder")
+        name = "Ponder";
+
+    auto& options = engine.get_options();
+    if (options.count(name))
+    {
+        std::istringstream uci_is("name " + name + (value.empty() ? "" : " value " + value));
+        options.setoption(uci_is);
+    }
+    // UCCI 规定: 不认识的选项直接忽略 (batch, debug, usebook, bookfiles, idle ...)
 }
 
 u64 UCIEngine::perft(const Search::LimitsType& limits) {
@@ -592,6 +729,20 @@ int win_rate_model(Value v, const Position& pos) {
 }
 
 std::string UCIEngine::format_score(const Score& s) {
+    if (ucciMode)
+    {
+        // UCCI: "score <n>", 没有 cp / mate 关键字; 杀棋用 ±(10000 - 步数) 表示
+        const auto ucci = overload{[](Score::Mate mate) -> std::string {
+                                       int v = mate.plies > 0 ? 10000 - mate.plies
+                                                              : -10000 - mate.plies;
+                                       return std::to_string(v);
+                                   },
+                                   [](Score::InternalUnits units) -> std::string {
+                                       return std::to_string(units.value);
+                                   }};
+        return s.visit(ucci);
+    }
+
     const auto format = overload{[](Score::Mate mate) -> std::string {
                                      auto m = (mate.plies > 0 ? (mate.plies + 1) : mate.plies) / 2;
                                      return std::string("mate ") + std::to_string(m);

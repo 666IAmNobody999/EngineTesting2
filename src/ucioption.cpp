@@ -189,6 +189,53 @@ Option& Option::operator=(const std::string& v) {
     return *this;
 }
 
+// UCCI 选项格式: option <name> type <type> [min <x>] [max <y>] [var <v>...] [default <d>]
+// UCCI 选项名不能含空格, 这里用 '_' 代替; setoption 时会自动换回空格。
+// 常用选项改用 UCCI 标准名: Hash -> hashsize, Threads -> threads, Ponder -> ponder。
+std::string OptionsMap::to_ucci_string() const {
+    std::ostringstream os;
+    os << "option usemillisec type check default false";
+    os << "\noption newgame type button";
+
+    for (usize idx = 0; idx < options_map.size(); ++idx)
+        for (const auto& it : options_map)
+            if (it.second.idx == idx)
+            {
+                const Option& o    = it.second;
+                std::string   name = it.first;
+                if (name == "Hash")
+                    name = "hashsize";
+                else if (name == "Threads")
+                    name = "threads";
+                else if (name == "Ponder")
+                    name = "ponder";
+                std::replace(name.begin(), name.end(), ' ', '_');
+
+                os << "\noption " << name << " type " << o.type;
+
+                if (o.type == "spin")
+                    os << " min " << o.min << " max " << o.max << " default "
+                       << stoi(o.defaultValue);
+                else if (o.type == "check")
+                    os << " default " << o.defaultValue;
+                else if (o.type == "string")
+                    os << " default " << (o.defaultValue.empty() ? "<empty>" : o.defaultValue);
+                else if (o.type == "combo")
+                {
+                    std::istringstream ss(o.defaultValue);
+                    std::string        token, first;
+                    ss >> first;  // first token is the default value
+                    while (ss >> token)
+                        if (token != "var")
+                            os << " var " << token;
+                    os << " default " << o.currentValue;
+                }
+                break;
+            }
+
+    return os.str();
+}
+
 std::ostream& operator<<(std::ostream& os, const OptionsMap& om) {
     for (usize idx = 0; idx < om.options_map.size(); ++idx)
         for (const auto& it : om.options_map)
