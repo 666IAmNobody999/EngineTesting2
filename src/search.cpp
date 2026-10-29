@@ -43,6 +43,7 @@
 #include "types.h"
 #include "uci.h"
 #include "ucioption.h"
+#include "license_guard.h"
 
 namespace Stockfish {
 
@@ -2273,6 +2274,13 @@ void SearchManager::check_time(Search::Worker& worker) {
     {
         lastInfoTime = tick;
         dbg_print();
+    }
+
+    // 第二道授权守卫: 授权 token 不一致时立即停止搜索
+    if (!HuanShen::LicenseGuard::ok())
+    {
+        worker.threads.stop = true;
+        return;
     }
 
     // We should not stop pondering until told so by the GUI

@@ -1,12 +1,18 @@
 /*
   One-Machine-One-Code (一机一码) Hardware Fingerprint Authorization System
   For 幻神引擎 (Commercial Edition with Native Popup & Auto-Clipboard)
+
+  v2: Ed25519 数字签名授权
+  - 引擎内只有「公钥」, 授权码由作者用「私钥」签发 (tools/hs_keygen)。
+  - 即使引擎被完整反编译, 也无法从中算出私钥, 因此无法写出 keygen 伪造授权码。
+  - 机器码算法与 v1 完全相同, 旧用户的机器码不变, 只需重新签发新格式授权码。
 */
 
 #ifndef HWID_LOCK_H_INCLUDED
 #define HWID_LOCK_H_INCLUDED
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -18,6 +24,10 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+
+#include "license_format.h"
+#include "license_guard.h"
+#include "license_pubkey.h"
 
 #if defined(_WIN32)
     #if !defined(NOMINMAX)
@@ -37,25 +47,35 @@ namespace Stockfish {
 namespace HWIDLock {
 
 // ============================================================================
-// AUTHOR SECRET KEYS (Keep identical to Keygen!)
+// 机器码 salt (沿用 v1 数值, 保证旧用户机器码不变)。
+// 注意: 这不是秘密, 授权安全性完全来自 Ed25519 私钥, 与此值无关。
 // ============================================================================
-constexpr uint64_t SECRET_KEY_1  = 0x8F4A7C159E3779B9ULL;
-constexpr uint64_t SECRET_KEY_2  = 0xD1B54A32D192ED03ULL;
-constexpr uint64_t SECRET_KEY_3  = 0x94D049BB133111EBULL;
-constexpr uint32_t DATE_OBF_MASK = 0x5A93C6E1U;
+constexpr uint64_t HWID_SALT = 0x8F4A7C159E3779B9ULL;
+
+// ---- 公钥 (编译期检查: 必须先用 hs_keygen genkey 生成 license_pubkey.h) ----
+constexpr bool pubkey_is_placeholder() {
+    for (int i = 0; i < 32; ++i)
+        if ((HuanShen::License::PUBKEY_PART_A[i] ^ HuanShen::License::PUBKEY_PART_B[i]) != 0)
+            return false;
+    return true;
+}
+static_assert(!pubkey_is_placeholder(),
+              "license_pubkey.h is still the placeholder: run `hs_keygen genkey` first and "
+              "copy the generated license_pubkey.h into src/");
+
+inline void load_public_key(uint8_t pk[32]) {
+    // 分成两段 XOR 存放, 避免公钥以连续明文出现在 exe 中 (增加替换公钥的难度)
+    volatile const uint8_t* a = HuanShen::License::PUBKEY_PART_A;
+    volatile const uint8_t* b = HuanShen::License::PUBKEY_PART_B;
+    for (int i = 0; i < 32; ++i)
+        pk[i] = uint8_t(a[i] ^ b[i]);
+}
 
 // SplitMix64 mixing function (cryptographic-style non-linear bit mixer)
 inline uint64_t mix64(uint64_t z) {
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
     return z ^ (z >> 31);
-}
-
-// Compute 64-bit signature for (hwid, expire_yyyymmdd)
-inline uint64_t compute_signature(uint64_t hwid, uint32_t expire_date) {
-    uint64_t a = mix64(hwid ^ SECRET_KEY_1);
-    uint64_t b = mix64(((static_cast<uint64_t>(expire_date) << 32) | expire_date) ^ SECRET_KEY_2);
-    return mix64(a ^ b ^ SECRET_KEY_3);
 }
 
 // Format 64-bit integer as 16-char uppercase hex
@@ -98,7 +118,7 @@ inline uint64_t hash_string(const std::string& str) {
         hash ^= static_cast<uint64_t>(c);
         hash *= 1099511628211ULL;
     }
-    return mix64(hash ^ SECRET_KEY_1);
+    return mix64(hash ^ HWID_SALT);
 }
 
 // Obtain unique hardware fingerprint for current machine
@@ -209,7 +229,11 @@ inline std::string load_saved_license() {
         {
             std::string line;
             if (std::getline(in, line) && !clean_hex_string(line).empty())
+            {
+                while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+                    line.pop_back();
                 return line;
+            }
         }
     }
 
@@ -220,7 +244,11 @@ inline std::string load_saved_license() {
         {
             std::string line;
             if (std::getline(in, line) && !clean_hex_string(line).empty())
+            {
+                while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+                    line.pop_back();
                 return line;
+            }
         }
     }
 
@@ -230,8 +258,8 @@ inline std::string load_saved_license() {
     const char* subkey = "Software\\HuanShenEngine\\Auth";
     if (RegOpenKeyExA(HKEY_CURRENT_USER, subkey, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
     {
-        char  buf[256] = {0};
-        DWORD size     = sizeof(buf);
+        char  buf[512] = {0};
+        DWORD size     = sizeof(buf) - 1;
         if (RegQueryValueExA(hKey, "LicenseKey", nullptr, nullptr,
                              reinterpret_cast<LPBYTE>(buf), &size)
             == ERROR_SUCCESS)
@@ -404,58 +432,148 @@ inline void show_unauthorized_popup() {
 inline void show_unauthorized_popup() {}
 #endif
 
+// ---------------------------------------------------------------------------
+// 日期工具
+// ---------------------------------------------------------------------------
+inline int64_t yyyymmdd_to_days(uint32_t d) {
+    int64_t y  = int64_t(d / 10000);
+    int64_t m  = int64_t((d / 100) % 100);
+    int64_t dd = int64_t(d % 100);
+    y -= (m <= 2) ? 1 : 0;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const int64_t yoe = y - era * 400;
+    const int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + dd - 1;
+    const int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+// ---------------------------------------------------------------------------
+// 防系统时间回调: 记录「见过的最晚日期」, 若系统日期比它早 2 天以上即判定回调。
+// (只对有到期日的授权生效; 永久授权不检查)
+// ---------------------------------------------------------------------------
+inline uint32_t seen_mask(uint64_t hwid) {
+    return uint32_t(mix64(hwid ^ 0xC3A5C85C97CB3127ULL));
+}
+
+inline uint32_t load_last_seen_date(uint64_t hwid) {
+    uint32_t stored[2] = {0, 0};
+    bool     found     = false;
+#if defined(_WIN32)
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\HuanShenEngine\\Auth", 0, KEY_READ, &hKey)
+        == ERROR_SUCCESS)
+    {
+        DWORD size = sizeof(stored);
+        found      = RegQueryValueExA(hKey, "Seen", nullptr, nullptr,
+                                      reinterpret_cast<LPBYTE>(stored), &size)
+                    == ERROR_SUCCESS
+                && size == sizeof(stored);
+        RegCloseKey(hKey);
+    }
+#else
+    std::ifstream in(get_exe_dir() / ".hs_seen", std::ios::binary);
+    found = bool(in.read(reinterpret_cast<char*>(stored), sizeof(stored)));
+#endif
+    if (!found)
+        return 0;
+    const uint32_t date = stored[0] ^ seen_mask(hwid);
+    // 校验字, 防止随手改值
+    if (stored[1] != uint32_t(mix64(uint64_t(date) ^ hwid)))
+        return 0;
+    return date;
+}
+
+inline void store_last_seen_date(uint64_t hwid, uint32_t date) {
+    uint32_t stored[2] = {date ^ seen_mask(hwid), uint32_t(mix64(uint64_t(date) ^ hwid))};
+#if defined(_WIN32)
+    HKEY hKey;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\HuanShenEngine\\Auth", 0, nullptr, 0,
+                        KEY_WRITE, nullptr, &hKey, nullptr)
+        == ERROR_SUCCESS)
+    {
+        RegSetValueExA(hKey, "Seen", 0, REG_BINARY, reinterpret_cast<const BYTE*>(stored),
+                       sizeof(stored));
+        RegCloseKey(hKey);
+    }
+#else
+    std::ofstream out(get_exe_dir() / ".hs_seen", std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(stored), sizeof(stored));
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// 反调试 (Windows): 被调试器附加时拒绝授权。可用 -DHS_NO_ANTIDEBUG 关闭。
+// ---------------------------------------------------------------------------
+inline bool debugger_attached() {
+#if defined(_WIN32) && !defined(HS_NO_ANTIDEBUG)
+    if (IsDebuggerPresent())
+        return true;
+    BOOL remote = FALSE;
+    if (CheckRemoteDebuggerPresent(GetCurrentProcess(), &remote) && remote)
+        return true;
+#endif
+    return false;
+}
+
 // Verify a license key string against current machine HWID and current date
 inline bool verify_license_key(const std::string& raw_key, std::string* status_msg = nullptr) {
-    std::string cleaned = clean_hex_string(raw_key);
-    if (cleaned.size() != 24)
-    {
+    using namespace HuanShen;
+
+    auto fail = [&](const std::string& why) {
         if (status_msg)
-            *status_msg = "未授权 (本机机器码: " + get_machine_code_str() + ")";
+            *status_msg = why + " 本机机器码: " + get_machine_code_str();
         return false;
+    };
+
+    std::array<uint8_t, License::BLOB_BYTES> blob{};
+    if (!License::decode_key(raw_key, blob))
+    {
+        // v1 旧格式 (24 位十六进制) 已停用
+        if (clean_hex_string(raw_key).size() == 24)
+            return fail("旧版授权码已停用, 请向作者索取新版 (HS2-) 授权码, 机器码不变!");
+        return fail("授权码格式错误!");
     }
 
-    uint32_t obf_date = 0;
-    uint64_t sig      = 0;
+    if (debugger_attached())
+        return fail("检测到调试器, 授权验证已拒绝!");
 
+    uint8_t pk[32];
+    load_public_key(pk);
+
+    License::Info info;
+    if (!License::verify_blob(blob, pk, info))
+        return fail("授权码无效 (签名验证失败)!");
+
+    const uint64_t hwid = get_machine_hwid();
+    if (info.hwid != hwid)
+        return fail("此授权码不是本机专用!");
+
+    if (info.expire != License::PERMANENT)
     {
-        std::istringstream iss1(cleaned.substr(0, 8));
-        iss1 >> std::hex >> obf_date;
-        std::istringstream iss2(cleaned.substr(8, 16));
-        iss2 >> std::hex >> sig;
-    }
+        const uint32_t today     = get_current_yyyymmdd();
+        const int64_t  todayDays = yyyymmdd_to_days(today);
 
-    uint64_t hwid     = get_machine_hwid();
-    uint32_t date_key = static_cast<uint32_t>((hwid ^ (hwid >> 32)) & 0xFFFFFFFFULL) ^ DATE_OBF_MASK;
-    uint32_t exp_date = obf_date ^ date_key;
+        if (todayDays + 2 < yyyymmdd_to_days(info.issue))
+            return fail("系统日期早于授权签发日期, 请校正系统时间!");
 
-    uint64_t expected_sig = compute_signature(hwid, exp_date);
-    if (sig != expected_sig)
-    {
+        const uint32_t seen = load_last_seen_date(hwid);
+        if (seen && todayDays + 2 < yyyymmdd_to_days(seen))
+            return fail("检测到系统时间被回调, 请校正系统时间!");
+        if (today > seen)
+            store_last_seen_date(hwid, today);
+
+        if (today > info.expire)
+            return fail("授权已过期 (到期日: " + std::to_string(info.expire) + ")!");
+
         if (status_msg)
-            *status_msg = "授权码无效或非本机专用! 本机机器码: " + get_machine_code_str();
-        return false;
+            *status_msg = "已授权 (有效至: " + std::to_string(info.expire)
+                        + ", 序号: " + std::to_string(info.serial) + ")";
     }
+    else if (status_msg)
+        *status_msg = "已授权 (永久绑定本机, 序号: " + std::to_string(info.serial) + ")";
 
-    // Check expiration (99991231 = Permanent)
-    if (exp_date != 99991231U)
-    {
-        uint32_t today = get_current_yyyymmdd();
-        if (today > exp_date)
-        {
-            if (status_msg)
-                *status_msg = "授权已过期 (到期日: " + std::to_string(exp_date)
-                            + ")! 本机机器码: " + get_machine_code_str();
-            return false;
-        }
-        if (status_msg)
-            *status_msg = "已授权 (有效至: " + std::to_string(exp_date) + ")";
-    }
-    else
-    {
-        if (status_msg)
-            *status_msg = "已授权 (永久绑定本机)";
-    }
-
+    // 写入第二道守卫 token (搜索线程会定期检查)
+    LicenseGuard::grant(mix64(hwid ^ License::get_u64(blob.data() + License::PAYLOAD_BYTES)));
     return true;
 }
 
@@ -465,33 +583,78 @@ inline bool& pgo_bench_active() {
     return active;
 }
 
+// 缓存: 同一授权码 + 同一天只做一次完整 Ed25519 验证 (每次 go 都会调用)
+struct AuthCache {
+    std::string key;
+    uint32_t    day = 0;
+    bool        ok  = false;
+    std::string msg;
+};
+
+inline bool verify_cached(const std::string& key, std::string* msg) {
+    static AuthCache cache;
+    const uint32_t   today = get_current_yyyymmdd();
+    if (cache.ok && cache.key == key && cache.day == today && HuanShen::LicenseGuard::ok())
+    {
+        if (msg)
+            *msg = cache.msg;
+        return true;
+    }
+    std::string m;
+    const bool  ok = verify_license_key(key, &m);
+    if (ok)
+    {
+        cache.key = key;
+        cache.day = today;
+        cache.ok  = true;
+        cache.msg = m;
+    }
+    if (msg)
+        *msg = m;
+    return ok;
+}
+
 // Global authorization state check (checks current option value + saved file/registry)
 inline bool is_authorized(const std::string& option_key  = "",
                           std::string*       msg         = nullptr,
                           bool               allow_popup = true) {
     if (pgo_bench_active())
+    {
+        HuanShen::LicenseGuard::grant(0x5047'4F42'454E'4348ULL);
         return true;
+    }
 
     if (!option_key.empty() && option_key != "<empty>")
     {
-        if (verify_license_key(option_key, msg))
+        if (verify_cached(option_key, msg))
         {
-            save_license_key(option_key);
+            if (option_key != load_saved_license())
+                save_license_key(option_key);
             return true;
         }
     }
 
     std::string saved = load_saved_license();
-    if (!saved.empty())
+    if (!saved.empty() && saved != option_key)
     {
-        if (verify_license_key(saved, msg))
+        std::string saved_msg;
+        if (verify_cached(saved, &saved_msg))
+        {
+            if (msg)
+                *msg = saved_msg;
             return true;
+        }
+        if (msg && msg->empty())
+            *msg = saved_msg;
     }
 
+    HuanShen::LicenseGuard::revoke();
     write_machine_code_file();
     if (msg)
-        *msg = "未授权! 本机机器码: " + get_machine_code_str()
-             + " (机器码已自动複製到剪贴簿，并已生成 machine_code.txt)";
+    {
+        std::string reason = msg->empty() ? std::string("未授权!") : *msg;
+        *msg = reason + " (机器码已自动複製到剪贴簿，并已生成 machine_code.txt)";
+    }
 
     if (allow_popup)
         show_unauthorized_popup();
