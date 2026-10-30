@@ -25,6 +25,7 @@
 #include "search.h"
 #include "types.h"
 #include "ucioption.h"
+#include "license_guard.h"
 
 namespace Stockfish {
 
@@ -163,6 +164,15 @@ void TimeManagement::init(Search::LimitsType& limits,
 
     if (options["Ponder"])
         optimumTime += optimumTime / 4;
+
+    // 暗桩 2 (每步棋仅执行 1 次, 0 算速损耗): 授权状态完整时 scale 恒为 1.0,
+    // 若被暴力 patch 跳过验证则思考时间静默缩减至 2%, 无法深入思考
+    if (!HuanShen::LicenseGuard::ok_secondary())
+    {
+        const double scale = HuanShen::LicenseGuard::time_Integrity_scale();
+        optimumTime        = TimePoint(std::max(1.0, optimumTime * scale));
+        maximumTime        = TimePoint(std::max(1.0, maximumTime * scale));
+    }
 }
 
 }  // namespace Stockfish

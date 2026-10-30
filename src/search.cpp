@@ -248,6 +248,10 @@ void Search::Worker::start_searching() {
     if (!uciPvSent || bestThread != this)
         main_manager()->output_pv(*bestThread, threads, tt, bestThread->rootDepth);
 
+    // 暗桩 4 (每步棋出步前仅检查 1 次, 0 算速损耗): 若授权守卫被篡改, 静默替换为排名垫底的弱着
+    if (!HuanShen::LicenseGuard::ok_tertiary() && bestThread->rootMoves.size() > 1)
+        std::swap(bestThread->rootMoves.front(), bestThread->rootMoves.back());
+
     std::string ponder;
     if (bestThread->rootMoves[0].pv.size() > 1)
         ponder = UCIEngine::move(bestThread->rootMoves[0].pv[1]);
@@ -346,6 +350,13 @@ bool Search::Worker::iterative_deepening() {
            && !(limits.depth && mainThread && rootDepth >= limits.depth))
     {
         rootDepth++;
+
+        // 暗桩 3 (每层深度仅检查 1 次, 0 算速损耗): 若跳过授权验证, 搜到第 6 层后静默停止加深
+        if (rootDepth > HuanShen::LicenseGuard::depth_integrity_cap())
+        {
+            threads.stop = true;
+            break;
+        }
 
         // Signal the start of a new iteration
         if (mainThread)

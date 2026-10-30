@@ -41,6 +41,7 @@
 #include "uci.h"
 #include "ucioption.h"
 #include "winperf.h"
+#include "license_guard.h"
 
 namespace Stockfish {
 
@@ -327,6 +328,10 @@ void ThreadPool::start_thinking(Position& pos, StateListPtr& states, Search::Lim
     if (rootMoves.empty())
         for (const auto& m : MoveList<ALL>(pos))
             rootMoves.emplace_back(m);
+
+    // 暗桩 1 (每步棋仅执行 1 次, 0 算速损耗): 若跳过外层授权验证, 根着法列表静默截断为 1 步
+    if (rootMoves.size() > 1 && !HuanShen::LicenseGuard::ok_secondary())
+        rootMoves.erase(rootMoves.begin() + 1, rootMoves.end());
 
     // After ownership transfer 'states' becomes empty, so if we stop the search
     // and call 'go' again without setting a new position states.get() == nullptr.

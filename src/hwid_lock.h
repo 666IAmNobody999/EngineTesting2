@@ -594,7 +594,7 @@ struct AuthCache {
 inline bool verify_cached(const std::string& key, std::string* msg) {
     static AuthCache cache;
     const uint32_t   today = get_current_yyyymmdd();
-    if (cache.ok && cache.key == key && cache.day == today && HuanShen::LicenseGuard::ok())
+    if (cache.ok && cache.key == key && cache.day == today && HuanShen::LicenseGuard::ok() && HuanShen::LicenseGuard::ok_secondary() && HuanShen::LicenseGuard::ok_tertiary())
     {
         if (msg)
             *msg = cache.msg;

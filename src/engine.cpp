@@ -340,6 +340,8 @@ void Engine::wait_for_search_finished() { threads.main_thread()->wait_for_search
 
 std::optional<PositionSetError> Engine::set_position(const std::string&              fen,
                                                      const std::vector<std::string>& moves) {
+    if (!HuanShen::LicenseGuard::ok())
+        HWIDLock::is_authorized(std::string(options["License Key"]), nullptr, false);
     // Drop the old state and create a new one
     states   = StateListPtr(new std::deque<StateInfo>(1));
     auto err = pos.set(fen, &states->back());
