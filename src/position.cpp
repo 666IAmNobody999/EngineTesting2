@@ -617,13 +617,14 @@ bool Position::gives_check(Move m) const {
 // Makes a move, and saves all information necessary
 // to a StateInfo object. The move is assumed to be legal. Pseudo-legal
 // moves should be filtered out before this function is called.
-// If a pointer to the TT table is passed, the entry for the new position
-// will be prefetched, and likewise for shared history.
+// If a pointer to the shared histories is passed, their entries for the
+// new position will be prefetched. The TT entry is already prefetched by
+// Search::Worker::do_move() via prefetch_key(), so tt is no longer used here.
 void Position::do_move(Move                      m,
                        StateInfo&                newSt,
                        bool                      givesCheck,
                        Dirties&                  dirties,
-                       const TranspositionTable* tt      = nullptr,
+                       [[maybe_unused]] const TranspositionTable* tt = nullptr,
                        const SharedHistories*    history = nullptr) {
 
     using namespace Eval::NNUE;
@@ -710,8 +711,6 @@ void Position::do_move(Move                      m,
 
     // Update hash key
     k ^= Zobrist::psq[pc][from] ^ Zobrist::psq[pc][to];
-    if (tt)
-        prefetch(tt->first_entry(adjust_key60(k)));
     // Update the key with the final value
     st->key = k;
 

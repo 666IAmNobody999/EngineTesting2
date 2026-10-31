@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <initializer_list>
 #include <iterator>
 #include <optional>
 #include <sstream>
@@ -316,6 +317,11 @@ Search::LimitsType UCIEngine::parse_limits(std::istream& is) {
         if (is.fail())
             terminate_on_critical_error("Invalid argument for '" + token + "'");
     }
+
+    // Sanitize negative time values, zero for stm means no TM
+    for (auto* t : {&limits.time[WHITE], &limits.time[BLACK], &limits.movetime})
+        if (*t < 0)
+            *t = 1;
 
     // UCCI 只给了自己的时间而没给对方时间时, 视作双方相同, 避免 timeAdvantage 误判
     if (ucciTime && limits.time[us] && !limits.time[them])
