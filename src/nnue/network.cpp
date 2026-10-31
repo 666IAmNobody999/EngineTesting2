@@ -43,8 +43,6 @@
 extern "C" {
 extern const unsigned char pikafish_embedded_net_main[];
 extern const unsigned char pikafish_embedded_net_main_end[];
-extern const unsigned char pikafish_embedded_net_zero[];
-extern const unsigned char pikafish_embedded_net_zero_end[];
 }
 #endif
 
@@ -241,8 +239,7 @@ void Network::load_internal([[maybe_unused]] const fs::path& evalfilePath,
         const unsigned char* end;
     };
     const EmbeddedNet nets[] = {
-      {EvalFileDefaultName, pikafish_embedded_net_main, pikafish_embedded_net_main_end},
-      {EvalFileZeroTestName, pikafish_embedded_net_zero, pikafish_embedded_net_zero_end}};
+      {EvalFileDefaultName, pikafish_embedded_net_main, pikafish_embedded_net_main_end}};
 
     for (const auto& net : nets)
     {

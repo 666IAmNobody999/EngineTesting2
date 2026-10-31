@@ -142,7 +142,7 @@ class Logger {
 //      幻神引擎 version
 std::string engine_version_info() {
     std::stringstream ss;
-    ss << "Huan Shen Engine  " << version << std::setfill('0');
+    ss << "Huan Shen Engine " << version << std::setfill('0');
 
     if constexpr (version == "dev")
     {

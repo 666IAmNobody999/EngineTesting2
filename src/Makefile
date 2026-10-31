@@ -59,7 +59,7 @@ else ifeq ($(COMP),mingw)
 	endif
 endif
 
-### Embed the NNUE nets (pikafish.nnue + pikafish_zero_test.nnue) in the binary.
+### Embed the NNUE net (pikafish.nnue) in the binary.
 ### Default: yes for Android (COMP=ndk) and Windows, no for every other target.
 ifeq ($(COMP),ndk)
 	embed ?= yes
@@ -718,7 +718,7 @@ else
 endif
 
 ### 3.2.1b Embedded nets (nnue/embedded_nets.S)
-EMBED_NETS = pikafish.nnue pikafish_zero_test.nnue
+EMBED_NETS = pikafish.nnue
 ifeq ($(embed),yes)
 	CXXFLAGS += -DNNUE_EMBEDDING
 endif

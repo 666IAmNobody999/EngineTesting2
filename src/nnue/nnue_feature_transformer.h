@@ -161,6 +161,7 @@ class FeatureTransformer {
     void permute_weights() {
         permute<16>(biases, PackusEpi16Order);
         permute<8>(weights, PackusEpi16Order);
+
         permute<8>(threatWeights, PackusEpi16Order);
 
 #if defined(USE_PAIRED_WIDENING_ADD)
@@ -189,7 +190,7 @@ class FeatureTransformer {
 
     // Read network parameters
     bool read_parameters(std::istream& stream) {
-        read_leb_128(stream, biases);
+        read_little_endian(stream, biases.data(), HalfDimensions);
 
         read_little_endian(stream, threatWeights.data(), ThreatWeightSize);
 
@@ -206,7 +207,7 @@ class FeatureTransformer {
 
         copy->unpermute_weights();
 
-        write_leb_128<BiasType>(stream, copy->biases);
+        write_little_endian(stream, copy->biases.data(), HalfDimensions);
 
         write_little_endian(stream, copy->threatWeights.data(), ThreatWeightSize);
 
@@ -226,6 +227,10 @@ class FeatureTransformer {
         hash_combine(h, get_hash_value());
 
         return h;
+    }
+
+    const WeightType* psq_weights(int block) const {
+        return &weights[usize(PSQFeatureSet::block_offset(block)) * HalfDimensions];
     }
 
     // Convert input features

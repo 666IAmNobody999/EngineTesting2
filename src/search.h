@@ -244,7 +244,7 @@ constexpr usize DrawMultiPV = 6;
 // centipawns, Elo score type units) there is a 1 in HumanChance probability of
 // playing, instead of the best move, the searched root move that is between
 // HumanMinDrop and HumanMaxDrop centipawns worse, preferring the smallest drop.
-constexpr usize HumanMultiPV      = 4;
+constexpr usize HumanMultiPV      = 6;
 constexpr int   HumanChance       = 5;
 constexpr int   HumanMinAdvantage = 100;
 constexpr int   HumanMinDrop      = 50;

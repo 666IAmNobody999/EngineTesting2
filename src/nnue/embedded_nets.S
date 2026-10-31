@@ -22,15 +22,6 @@ pikafish_embedded_net_main:
     .incbin "pikafish.nnue"
 pikafish_embedded_net_main_end:
 
-    .balign 64
-    .globl  pikafish_embedded_net_zero
-    .globl  pikafish_embedded_net_zero_end
-    .hidden pikafish_embedded_net_zero
-    .hidden pikafish_embedded_net_zero_end
-pikafish_embedded_net_zero:
-    .incbin "pikafish_zero_test.nnue"
-pikafish_embedded_net_zero_end:
-
 #elif defined(NNUE_EMBEDDING) && defined(_WIN32)
 
 // Windows (PE/COFF): read-only data section; COFF has no .hidden. x86-64 and
@@ -49,13 +40,6 @@ pikafish_embedded_net_zero_end:
 NET_SYM(pikafish_embedded_net_main):
     .incbin "pikafish.nnue"
 NET_SYM(pikafish_embedded_net_main_end):
-
-    .balign 64
-    .globl  NET_SYM(pikafish_embedded_net_zero)
-    .globl  NET_SYM(pikafish_embedded_net_zero_end)
-NET_SYM(pikafish_embedded_net_zero):
-    .incbin "pikafish_zero_test.nnue"
-NET_SYM(pikafish_embedded_net_zero_end):
 
 #endif
 
