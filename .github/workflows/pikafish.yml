@@ -106,30 +106,6 @@ jobs:
           name: ${{ env.EXE }}
           path: ${{ env.EXE }}
 
-  Pikafish:
-    name: Pikafish
-    runs-on: ubuntu-slim
-    needs: [Pikafish-x86-64]
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: 幻神引擎-*
-          path: Artifacts
-
-      - name: Put binaries into release root
-        run: cp Artifacts/幻神引擎-*/* .
-
-      # Artifacts automatically get zipped.
-      # To avoid double-zipping, we use the unzipped directory
-      - uses: actions/upload-artifact@v7
-        with:
-          name: 幻神引擎
-          path: |
-            幻神引擎-*
-
   Pikafish-release:
     name: Create draft release
     runs-on: ubuntu-latest
