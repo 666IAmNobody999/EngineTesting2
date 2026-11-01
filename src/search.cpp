@@ -755,27 +755,69 @@ bool Search::Worker::iterative_deepening() {
         const int  minDropCp = shaped ? Attack::HumanMinDrop / 2 : Attack::HumanMinDrop;
         const int  maxDropCp = shaped ? Attack::HumanMaxDrop / 2 : Attack::HumanMaxDrop;
 
-        if (bestCp > Attack::HumanMinAdvantage && rng.rand<unsigned>() % Attack::HumanChance == 0)
+        // Pity timer: after HumanChance - 1 eligible moves in a row without a worse
+        // move, the next eligible move skips the random roll. If no move fits
+        // the drop window then, the window is widened so that the chosen move
+        // still keeps more than HumanMinAdvantage, and if all alternatives are
+        // less than minDropCp worse the worst of them is played. Only when no
+        // alternative exists at all is the counter kept for the next move.
+        int&       missed = main_manager()->humanMissed;
+        const bool forced = missed >= Attack::HumanChance - 1;
+        bool       played = false;
+
+        if (bestCp > Attack::HumanMinAdvantage
+            && (forced || rng.rand<unsigned>() % Attack::HumanChance == 0))
         {
-            usize chosen  = 0;
-            int   minDrop = maxDropCp + 1;
-            for (usize i = 1; i < multiPV && rootMoves[i].score != -VALUE_INFINITE; ++i)
-            {
-                if (is_decisive(rootMoves[i].score))
-                    continue;
-                const int drop = bestCp - UCIEngine::to_cp_normalized(rootMoves[i].score, rootPos);
-                if (drop >= minDropCp && drop < minDrop)
+            auto pick = [&](int maxDrop) {
+                usize chosenIdx = 0;
+                int   minDrop   = maxDrop + 1;
+                for (usize i = 1; i < multiPV && rootMoves[i].score != -VALUE_INFINITE; ++i)
                 {
-                    minDrop = drop;
-                    chosen  = i;
+                    if (is_decisive(rootMoves[i].score))
+                        continue;
+                    const int drop =
+                      bestCp - UCIEngine::to_cp_normalized(rootMoves[i].score, rootPos);
+                    if (drop >= minDropCp && drop < minDrop)
+                    {
+                        minDrop   = drop;
+                        chosenIdx = i;
+                    }
+                }
+                return chosenIdx;
+            };
+
+            usize chosen = pick(maxDropCp);
+            if (!chosen && forced)
+                chosen = pick(bestCp - Attack::HumanMinAdvantage - 1);
+
+            // Forced and every searched alternative is less than minDropCp
+            // worse: play the worst of them (largest drop) instead.
+            if (!chosen && forced)
+            {
+                int maxDrop = 0;
+                for (usize i = 1; i < multiPV && rootMoves[i].score != -VALUE_INFINITE; ++i)
+                {
+                    if (is_decisive(rootMoves[i].score))
+                        continue;
+                    const int drop =
+                      bestCp - UCIEngine::to_cp_normalized(rootMoves[i].score, rootPos);
+                    if (drop > maxDrop && drop < minDropCp)
+                    {
+                        maxDrop = drop;
+                        chosen  = i;
+                    }
                 }
             }
             if (chosen)
             {
                 std::swap(rootMoves[0], rootMoves[chosen]);
                 uciPvSent = false;
+                played    = true;
             }
         }
+
+        if (bestCp > Attack::HumanMinAdvantage)
+            missed = played ? 0 : missed + 1;
     }
 
     return uciPvSent;
@@ -886,6 +928,9 @@ void Search::Worker::undo_null_move(Position& pos) { pos.undo_null_move(); }
 
 // Reset histories, usually before a new game
 void Search::Worker::clear() {
+    if (is_mainthread())
+        main_manager()->humanMissed = 0;
+
     mainHistory.fill(-5);
     captureHistory.fill(-604);
 

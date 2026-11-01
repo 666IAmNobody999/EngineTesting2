@@ -246,6 +246,9 @@ constexpr usize DrawMultiPV = 6;
 // HumanMinDrop and HumanMaxDrop centipawns worse, preferring the smallest drop.
 constexpr usize HumanMultiPV      = 6;
 constexpr int   HumanChance       = 5;
+// Pity timer: after HumanChance - 1 eligible moves in a row without a worse
+// move being played, the HumanChance-th eligible move skips the random roll
+// and always plays one (e.g. HumanChance 5: 4 misses, the 5th is forced).
 constexpr int   HumanMinAdvantage = 100;
 constexpr int   HumanMinDrop      = 50;
 constexpr int   HumanMaxDrop      = 150;
@@ -384,6 +387,9 @@ class SearchManager {
     Value                bestPreviousScore;
     Value                bestPreviousAverageScore;
     bool                 stopOnPonderhit;
+
+    // Human-like: eligible moves in a row on which no worse move was played
+    int humanMissed = 0;
 
     const UpdateContext& updates;
 };
