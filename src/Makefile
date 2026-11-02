@@ -1333,9 +1333,12 @@ endif
 misc.o: misc.cpp $(BUILD_SHA_FILE) $(BUILD_DATE_FILE) $(BUILD_DIFFINDEX_FILE)
 	$(strip $(CXX) $(CPPFLAGS) $(CXXFLAGS) $(if $(GIT_SHA),-DGIT_SHA=$(GIT_SHA)) $(if $(GIT_DATE),-DGIT_DATE=$(GIT_DATE))) $(if $(GIT_DIFFINDEX),-DGIT_DIFFINDEX=$(GIT_DIFFINDEX)) -c -o $@ $<
 
+# HS_PGO_PROFILE_MAKE: only the instrumented PGO training binary may run a
+# bare `bench` without a licence; the final (profile-use / build) binary has
+# no such bypass. Only main.cpp / engine.cpp differ, the search is identical.
 clang-profile-make:
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) \
-	EXTRACXXFLAGS='-fprofile-generate ' \
+	EXTRACXXFLAGS='-fprofile-generate -DHS_PGO_PROFILE_MAKE' \
 	EXTRALDFLAGS=' -fprofile-generate' \
 	all
 
@@ -1349,21 +1352,21 @@ clang-profile-use:
 gcc-profile-make:
 	@mkdir -p profdir
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) \
-	EXTRACXXFLAGS='-fprofile-generate=profdir' \
+	EXTRACXXFLAGS='-fprofile-generate=profdir -DHS_PGO_PROFILE_MAKE' \
 	EXTRACXXFLAGS+=$(EXTRAPROFILEFLAGS) \
 	EXTRALDFLAGS='-lgcov' \
 	all
 
 gcc-profile-use:
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) \
-	EXTRACXXFLAGS='-fprofile-use=profdir -fno-peel-loops -fno-tracer' \
+	EXTRACXXFLAGS='-fprofile-use=profdir -fno-peel-loops -fno-tracer -Wno-coverage-mismatch' \
 	EXTRACXXFLAGS+=$(EXTRAPROFILEFLAGS) \
 	EXTRALDFLAGS='-lgcov' \
 	all
 
 icx-profile-make:
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) \
-	EXTRACXXFLAGS='-fprofile-instr-generate ' \
+	EXTRACXXFLAGS='-fprofile-instr-generate -DHS_PGO_PROFILE_MAKE' \
 	EXTRALDFLAGS=' -fprofile-instr-generate' \
 	all
 
