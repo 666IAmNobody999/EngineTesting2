@@ -50,8 +50,10 @@ int main(int argc, char* argv[]) {
     // Allow PGO build-time benchmark (`./pikafish bench`) to run during compilation.
     // 只允许「完全不带参数」的 bench (16MB / 1 线程 / 深度 13 / 内置局面),
     // 否则别人可用 `pikafish bench 256 8 30 my.fen depth` 绕过授权做分析。
+#if defined(HS_PGO_PROFILE_MAKE)
     if (argc == 2 && std::string(argv[1]) == "bench")
         HWIDLock::pgo_bench_active() = true;
+#endif
 
     std::cout << engine_info() << std::endl;
     {

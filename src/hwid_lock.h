@@ -541,11 +541,13 @@ inline bool verify_license_key(const std::string& raw_key, std::string* status_m
     load_public_key(pk);
 
     License::Info info;
-    if (!License::verify_blob(blob, pk, info))
+    std::uint64_t crypto_proof = 0xDEAD'BEEF'CAFE'BABEULL;
+    if (!License::verify_blob(blob, pk, info, &crypto_proof))
         return fail("授权码无效 (签名验证失败)!");
 
-    const uint64_t hwid = get_machine_hwid();
-    if (info.hwid != hwid)
+    const uint64_t    hwid      = get_machine_hwid();
+    volatile uint64_t hwid_diff = (info.hwid ^ hwid);
+    if (hwid_diff != 0)
         return fail("此授权码不是本机专用!");
 
     if (info.expire != License::PERMANENT)
@@ -572,16 +574,21 @@ inline bool verify_license_key(const std::string& raw_key, std::string* status_m
     else if (status_msg)
         *status_msg = "已授权 (永久绑定本机, 序号: " + std::to_string(info.serial) + ")";
 
-    // 写入第二道守卫 token (搜索线程会定期检查)
-    LicenseGuard::grant(mix64(hwid ^ License::get_u64(blob.data() + License::PAYLOAD_BYTES)));
+    // 写入三组守卫 token: 必须同时传入 crypto_proof 与 hwid_diff (正常时皆为 0)
+    // 若破解者用 NOP 跳过上方分支, 非 0 的 proof 将直接毒化所有暗桩 Token!
+    volatile uint64_t sig_part = License::get_u64(blob.data() + License::PAYLOAD_BYTES);
+    LicenseGuard::grant(mix64(hwid ^ sig_part), crypto_proof, hwid_diff);
     return true;
 }
 
-// Internal flag for PGO build-time benchmark only
+#if defined(HS_PGO_PROFILE_MAKE)
+// 仅在 PGO 第 1 阶段 (profile-make) 收集训练数据时编译此函数;
+// 最终发布的二进制 (profile-use / build) 完全不存在此函数与机器码!
 inline bool& pgo_bench_active() {
     static bool active = false;
     return active;
 }
+#endif
 
 // 缓存: 同一授权码 + 同一天只做一次完整 Ed25519 验证 (每次 go 都会调用)
 struct AuthCache {
@@ -594,7 +601,8 @@ struct AuthCache {
 inline bool verify_cached(const std::string& key, std::string* msg) {
     static AuthCache cache;
     const uint32_t   today = get_current_yyyymmdd();
-    if (cache.ok && cache.key == key && cache.day == today && HuanShen::LicenseGuard::ok() && HuanShen::LicenseGuard::ok_secondary() && HuanShen::LicenseGuard::ok_tertiary())
+    if (cache.ok && cache.key == key && cache.day == today && HuanShen::LicenseGuard::ok()
+        && HuanShen::LicenseGuard::ok_secondary() && HuanShen::LicenseGuard::ok_tertiary())
     {
         if (msg)
             *msg = cache.msg;
@@ -615,14 +623,19 @@ inline bool verify_cached(const std::string& key, std::string* msg) {
 }
 
 // Global authorization state check (checks current option value + saved file/registry)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
 inline bool is_authorized(const std::string& option_key  = "",
                           std::string*       msg         = nullptr,
                           bool               allow_popup = true) {
+#if defined(HS_PGO_PROFILE_MAKE)
     if (pgo_bench_active())
     {
-        HuanShen::LicenseGuard::grant(0x5047'4F42'454E'4348ULL);
+        HuanShen::LicenseGuard::grant(0x5047'4F42'454E'4348ULL, 0, 0);
         return true;
     }
+#endif
 
     if (!option_key.empty() && option_key != "<empty>")
     {

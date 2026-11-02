@@ -188,7 +188,11 @@ inline bool decode_key(std::string key, std::array<std::uint8_t, BLOB_BYTES>& bl
     for (auto& ch : pre)
         if (ch >= 'a' && ch <= 'z')
             ch = char(ch - 'a' + 'A');
-    if (pre != KEY_PREFIX)
+    // Obfuscated prefix check ("HS2-") so plain string search in disassembler won't locate this branch
+    if ((std::uint8_t(pre[0]) ^ 0xA5u) != (std::uint8_t('H') ^ 0xA5u)
+        || (std::uint8_t(pre[1]) ^ 0x5Au) != (std::uint8_t('S') ^ 0x5Au)
+        || (std::uint8_t(pre[2]) ^ 0x3Cu) != (std::uint8_t('2') ^ 0x3Cu)
+        || (std::uint8_t(pre[3]) ^ 0xC3u) != (std::uint8_t('-') ^ 0xC3u))
         return false;
 
     std::vector<std::uint8_t> bytes;
@@ -198,12 +202,18 @@ inline bool decode_key(std::string key, std::array<std::uint8_t, BLOB_BYTES>& bl
     return true;
 }
 
-// Full cryptographic check. Fills `info` on success.
+// Full cryptographic check with zero-proof output. Fills `info` on success.
 inline bool verify_blob(const std::array<std::uint8_t, BLOB_BYTES>& blob,
                         const std::uint8_t                          pk[32],
-                        Info&                                       info) {
-    const auto msg = signing_message(blob.data());
-    if (!Ed25519::verify(blob.data() + PAYLOAD_BYTES, msg.data(), msg.size(), pk))
+                        Info&                                       info,
+                        std::uint64_t*                              zero_proof_out = nullptr) {
+    const auto    msg        = signing_message(blob.data());
+    std::uint64_t zero_proof = 0xDEAD'BEEF'CAFE'BABEULL;
+    const bool    ok =
+      Ed25519::verify_with_proof(blob.data() + PAYLOAD_BYTES, msg.data(), msg.size(), pk, zero_proof);
+    if (zero_proof_out)
+        *zero_proof_out = zero_proof;
+    if (!ok)
         return false;
     info = unpack_payload(blob.data());
     return info.version == FORMAT_VERSION;

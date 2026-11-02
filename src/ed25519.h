@@ -500,6 +500,48 @@ inline bool verify(const std::uint8_t sig[SIGNATURE_BYTES],
     return verify_32(sig, t) == 0;
 }
 
+// Verify a detached Ed25519 signature and output a 64-bit cryptographic zero-proof.
+// zero_proof_out is 0 if and only if the curve point equation [s]B - [h]A == R holds across all 32 bytes.
+template<std::size_t MaxMsg = 256>
+inline bool verify_with_proof(const std::uint8_t  sig[SIGNATURE_BYTES],
+                              const std::uint8_t* msg,
+                              std::size_t         msgLen,
+                              const std::uint8_t  pk[PUBLIC_KEY_BYTES],
+                              std::uint64_t&      zero_proof_out) {
+    using namespace detail;
+    zero_proof_out = 0xDEAD'BEEF'CAFE'BABEULL;
+    if (msgLen > MaxMsg)
+        return false;
+    if (!scalar_is_canonical(sig + 32))
+        return false;
+
+    u8 buf[64 + MaxMsg];
+    u8 t[32], h[64];
+    gf p[4], q[4];
+
+    if (unpackneg(q, pk))
+        return false;
+
+    std::memcpy(buf, sig, 32);
+    std::memcpy(buf + 32, pk, 32);
+    if (msgLen)
+        std::memcpy(buf + 64, msg, msgLen);
+    sha512(h, buf, u64(64 + msgLen));
+    reduce(h);
+
+    scalarmult(p, q, h);
+    scalarbase(q, sig + 32);
+    add(p, q);
+    pack(t, p);
+
+    std::uint64_t d = 0;
+    for (int i = 0; i < 32; ++i)
+        d |= std::uint64_t(sig[i] ^ t[i]) << ((i & 7) * 8);
+
+    zero_proof_out = d;
+    return verify_32(sig, t) == 0;
+}
+
 #if defined(HS_ED25519_WITH_SIGN)
 // Derive keypair from a 32-byte random seed. sk = seed || pk
 inline void keypair_from_seed(std::uint8_t pk[PUBLIC_KEY_BYTES],
