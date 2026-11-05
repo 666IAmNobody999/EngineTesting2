@@ -339,6 +339,11 @@ bool Search::Worker::iterative_deepening() {
     int  failHighRecovery   = 0;
     bool uciPvSent          = false;
 
+    // Improved MultiPV 2: the time manager must judge the main line only. The
+    // second line's value and nodes would otherwise look like a falling eval
+    // and a less dominant best move, and make the search use more time.
+    u64 altNodes = 0;
+
     lowPlyHistory.fill(99);
 
     for (Color c : {WHITE, BLACK})
@@ -378,6 +383,8 @@ bool Search::Worker::iterative_deepening() {
         usize pvFirst = 0;
         pvLast        = rootMoves.size();
 
+        Value mainBestValue = -VALUE_INFINITE;
+
         if (!threads.increaseDepth)
             searchAgainCounter++;
 
@@ -409,6 +416,8 @@ bool Search::Worker::iterative_deepening() {
             }
 
             lastIterationIdxPV = rootMoves[pvIdx].previousPV;
+
+            const u64 lineStartNodes = nodes;
 
             // Reset UCI info selDepth for each depth and each PV line
             selDepth = 0;
@@ -488,6 +497,11 @@ bool Search::Worker::iterative_deepening() {
 
                 assert(alpha >= -VALUE_INFINITE && beta <= VALUE_INFINITE);
             }
+
+            if (!pvIdx)
+                mainBestValue = bestValue;
+            else if (altLine)
+                altNodes += nodes - lineStartNodes;
 
             // Gradually increase depth after reduced depth search
             if (failedHighCnt > 0 && !pvIdx)
@@ -628,10 +642,11 @@ bool Search::Worker::iterative_deepening() {
         // Do we have time for the next iteration? Can we stop searching now?
         if (limits.use_time_management() && !threads.stop && !mainThread->stopOnPonderhit)
         {
-            u64 nodesEffort = rootMoves[0].effort * 100000 / std::max(u64(1), u64(nodes));
+            const Value tmValue = altLine ? mainBestValue : bestValue;
+            u64 nodesEffort     = rootMoves[0].effort * 100000 / std::max(u64(1), u64(nodes) - altNodes);
 
-            double fallingEval = (16.93 + 2.73 * (mainThread->bestPreviousAverageScore - bestValue)
-                                  + 0.8 * (mainThread->iterValue[iterIdx] - bestValue))
+            double fallingEval = (16.93 + 2.73 * (mainThread->bestPreviousAverageScore - tmValue)
+                                  + 0.8 * (mainThread->iterValue[iterIdx] - tmValue))
                                / 100.0;
             fallingEval        = std::clamp(fallingEval, 0.610, 1.860);
 
@@ -680,7 +695,7 @@ bool Search::Worker::iterative_deepening() {
                 threads.increaseDepth = mainThread->ponder || elapsedTime <= totalTime * 0.26;
         }
 
-        mainThread->iterValue[iterIdx] = bestValue;
+        mainThread->iterValue[iterIdx] = altLine ? mainBestValue : bestValue;
         iterIdx                        = (iterIdx + 1) & 3;
     }
 

@@ -249,7 +249,7 @@ constexpr int   HumanChance       = 5;
 // Pity timer: after HumanChance - 1 eligible moves in a row without a worse
 // move being played, the HumanChance-th eligible move skips the random roll
 // and always plays one (e.g. HumanChance 5: 4 misses, the 5th is forced).
-constexpr int   HumanMinAdvantage = 100;
+constexpr int   HumanMinAdvantage = 150;
 constexpr int   HumanMinDrop      = 50;
 constexpr int   HumanMaxDrop      = 150;
 
