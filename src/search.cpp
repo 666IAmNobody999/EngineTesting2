@@ -727,11 +727,69 @@ bool Search::Worker::iterative_deepening() {
         }
     }
 
+    // Draw play: see Attack::DrawPlayMinPly. Only the main thread decides (its
+    // move is the one played, thread voting is off in these modes), Skill Level
+    // already randomises, and only lines searched in this iteration that are
+    // not decisive and keep 0..DrawPlayMaxCp take part.
+    bool drawPlayed = false;
+    if ((Attack::human_like(attackMode) || attackMode == AttackMode::FORCED_DRAW)
+        && is_mainthread() && !skill.enabled() && rootPos.game_ply() >= Attack::DrawPlayMinPly
+        && rootMoves[0].score != -VALUE_INFINITE && !is_decisive(rootMoves[0].score))
+    {
+        const int bestCp = UCIEngine::to_cp_normalized(rootMoves[0].score, rootPos);
+
+        if (bestCp >= 0 && bestCp <= Attack::DrawPlayMaxCp)
+        {
+            static PRNG rng(u64(now()) | 1);
+
+            std::vector<int> weight(multiPV, 0);
+            int              total = 0;
+
+            for (usize i = 0; i < multiPV && rootMoves[i].score != -VALUE_INFINITE; ++i)
+            {
+                if (is_decisive(rootMoves[i].score))
+                    continue;
+                const int cp = UCIEngine::to_cp_normalized(rootMoves[i].score, rootPos);
+                if (cp < 0 || cp > Attack::DrawPlayMaxCp)
+                    continue;
+
+                const Move m = rootMoves[i].pv[0];
+                int        w = rootPos.capture(m) ? Attack::DrawPlayCaptureWeight : 1;
+
+                // A move that repeats a position judged a draw by the active rules
+                StateInfo st;
+                Value     result = VALUE_NONE;
+                rootPos.do_move(m, st, &tt);
+                if (rootPos.rule_judge(result, 1) && result == VALUE_DRAW)
+                    w = Attack::DrawPlayRepeatWeight;
+                rootPos.undo_move(m);
+
+                weight[i] = w;
+                total += w;
+            }
+
+            if (total > 0)
+            {
+                int   r      = int(rng.rand<unsigned>() % unsigned(total));
+                usize chosen = 0;
+                while (r >= weight[chosen])
+                    r -= weight[chosen++];
+
+                if (chosen)
+                {
+                    std::swap(rootMoves[0], rootMoves[chosen]);
+                    uciPvSent = false;  // the reported PV must match the played move
+                }
+                drawPlayed = true;
+            }
+        }
+    }
+
     // Forced Draw: play the searched root move whose score is closest to zero.
     // Only lines searched in this iteration (score != -VALUE_INFINITE) qualify,
     // so an aborted MultiPV loop never promotes an unsearched move. Ties go to
     // the higher score, then to the better-ranked move.
-    if (attackMode == AttackMode::FORCED_DRAW)
+    if (attackMode == AttackMode::FORCED_DRAW && !drawPlayed)
     {
         usize chosen = 0;
         for (usize i = 1; i < multiPV && rootMoves[i].score != -VALUE_INFINITE; ++i)

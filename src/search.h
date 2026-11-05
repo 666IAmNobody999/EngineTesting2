@@ -253,6 +253,18 @@ constexpr int   HumanMinAdvantage = 150;
 constexpr int   HumanMinDrop      = 50;
 constexpr int   HumanMaxDrop      = 150;
 
+// Draw play (Human-like, Human-like Bare King and Forced Draw): from game ply
+// DrawPlayMinPly (move 30) on, with the best move worth 0..DrawPlayMaxCp
+// normalised centipawns, the game is a draw anyway. A random searched root move
+// that also keeps 0..DrawPlayMaxCp is then played, weighted towards moves that
+// repeat a position (draw by repetition) and captures (exchanges), so that the
+// draw is reached sooner and the play looks more human. A move scored below 0
+// is never chosen.
+constexpr int DrawPlayMinPly       = 60;
+constexpr int DrawPlayMaxCp        = 50;
+constexpr int DrawPlayRepeatWeight = 4;
+constexpr int DrawPlayCaptureWeight = 2;
+
 // Reads the "Attack Mode" combo option.
 AttackMode parse(const OptionsMap& options);
 }
