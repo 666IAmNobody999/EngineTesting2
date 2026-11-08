@@ -60,6 +60,11 @@ int            rule60MaxPly    = 120;
 int            rule60Limit     = 120;
 int            rule60KeyCap    = 120;
 int            rule60EvalDiv   = 244;
+// Checks counted per side towards rule 60: 10 for every rule, 20 for QiZheRule
+// （棋者象棋：判断中双方将军最多只计算 20 回合）. Set by the Repetition Rule option.
+// The hot path in do_move() keeps comparing with the constant 10; instead the
+// per-side counters start at 10 - checkCap (see check_base()).
+int            checkCap        = 10;
 
 void refresh_rule60() {
     const int maxPly = std::max(1, rule60MaxPly);
@@ -195,6 +200,7 @@ std::optional<PositionSetError> Position::set(const string& fenStr, StateInfo* s
     std::memset(reinterpret_cast<char*>(this), 0, sizeof(Position));
     std::memset(si, 0, sizeof(StateInfo));
     st = si;
+    st->check10[WHITE] = st->check10[BLACK] = RuleConfig::check_base();
 
     midEncoding[WHITE] = midEncoding[BLACK] = Eval::NNUE::Features::K6H4::BalanceEncoding;
 
@@ -647,6 +653,7 @@ void Position::do_move(Move                      m,
     sky_invalidate(st);
 
     // Increment ply counters. Clamp to 10 checks for each side in rule 60
+    // (20 for QiZheRule: the counters then start at -10, see RuleConfig::check_base()).
     // In particular, rule60 will be reset to zero later on in case of a capture.
     ++gamePly;
     if (!givesCheck || ++st->check10[sideToMove] <= 10)
@@ -704,7 +711,8 @@ void Position::do_move(Move                      m,
         k ^= Zobrist::psq[captured][capsq];
 
         // Reset rule 60 counter
-        st->check10[WHITE] = st->check10[BLACK] = st->rule60 = 0;
+        st->check10[WHITE] = st->check10[BLACK] = RuleConfig::check_base();
+        st->rule60                              = 0;
     }
     else
         dp.remove_sq = SQ_NONE;

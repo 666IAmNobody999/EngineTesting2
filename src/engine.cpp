@@ -158,6 +158,9 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
                    : o == "NoJudgement" ? RR::NO_JUDGEMENT
                                         : RR::ASIAN;
 
+                 // QiZheRule：自然著限判断中双方将军最多只计算 20 回合。
+                 RuleConfig::checkCap = RuleConfig::repetitionRule == RR::QIZHE ? 20 : 10;
+
                  // Couplings for AsianRule, SkyRule, ChineseRule and YitianRule:
                  // all four rules use rule120 (弈天规则 26：无吃子着数达到 120 步判和；
                  // 亚象联第四节：双方共走 120 步未有去子作和), Rule60MaxPly stays freely

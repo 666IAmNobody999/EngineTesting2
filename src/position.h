@@ -83,6 +83,9 @@ constexpr int RULE60_UNLIMITED = 1 << 14;
 extern int    rule60Limit;
 extern int    rule60KeyCap;
 extern int    rule60EvalDiv;
+extern int    checkCap;
+// Start value of StateInfo::check10 so that "> 10" still means "beyond checkCap".
+inline i16 check_base() { return i16(10 - checkCap); }
 void          refresh_rule60();
 
 inline bool chinese_like() {
