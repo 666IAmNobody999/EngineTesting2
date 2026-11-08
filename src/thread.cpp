@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <deque>
+#include <initializer_list>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -180,7 +181,14 @@ void ThreadPool::set(const NumaConfig&                           numaConfig,
         // This is undesirable, and so the default behaviour (i.e. when the user does not
         // change the NumaConfig UCI setting) is to not bind the threads to processors
         // unless we know for sure that we span NUMA nodes and replication is required.
-        const std::string numaPolicy(sharedState.options["NumaPolicy"]);
+        // NumaPolicy is a combo option (case-insensitive compare); normalise it.
+        const std::string numaPolicy = [&]() -> std::string {
+            const Option& np = sharedState.options["NumaPolicy"];
+            for (const char* name : {"system", "hardware", "none"})
+                if (np == name)
+                    return name;
+            return "auto";
+        }();
         const bool        doBindThreads = [&]() {
             if (numaPolicy == "none")
                 return false;

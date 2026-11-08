@@ -167,9 +167,46 @@ std::string engine_version_info() {
 }
 
 // "幻神" in the author line is written as UTF-8 bytes as well.
+// GUIs that read the engine through a pipe decode its output with the system
+// ANSI code page (GBK / Big5 on Chinese Windows), so Chinese UTF-8 text shows
+// as garbled characters. Convert it to that code page when stdout is not a
+// console and the conversion is lossless; otherwise keep UTF-8.
+std::string to_output_codepage(const std::string& utf8) {
+#ifdef _WIN32
+    DWORD mode;
+    if (GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode))
+        return utf8;
+
+    const UINT cp = GetACP();
+    if (cp == CP_UTF8)
+        return utf8;
+
+    const int wlen =
+      MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), int(utf8.size()), nullptr, 0);
+    if (wlen <= 0)
+        return utf8;
+    std::wstring wide(usize(wlen), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), int(utf8.size()), wide.data(), wlen);
+
+    const int len = WideCharToMultiByte(cp, 0, wide.data(), wlen, nullptr, 0, nullptr, nullptr);
+    if (len <= 0)
+        return utf8;
+    std::string out(usize(len), '\0');
+    // Keep UTF-8 if the code page cannot show the name (e.g. English Windows).
+    BOOL lossy = FALSE;
+    WideCharToMultiByte(cp, 0, wide.data(), wlen, out.data(), len, nullptr, &lossy);
+    if (lossy)
+        return utf8;
+    return out;
+#else
+    return utf8;
+#endif
+}
+
 std::string engine_info(bool to_uci) {
-    return engine_version_info() + (to_uci ? "\nid author " : " by ")
-         + "\xE5\xB9\xBB\xE7\xA5\x9E" " and the Pikafish developers (join our QQ Group: 860801936)";
+    return to_output_codepage(
+      engine_version_info() + (to_uci ? "\nid author " : " by ")
+      + "\xE5\xB9\xBB\xE7\xA5\x9E" " and the Pikafish developers (join our QQ Group: 860801936)");
 }
 
 

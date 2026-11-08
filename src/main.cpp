@@ -59,7 +59,7 @@ int main(int argc, char* argv[]) {
     {
         std::string auth_msg;
         if (!HWIDLock::is_authorized("", &auth_msg, true))
-            std::cout << HS_STR("info string [授权状态] ") << auth_msg << std::endl;
+            std::cout << to_output_codepage(HS_STR("info string [授权状态] ") + auth_msg) << std::endl;
     }
 
     // Windows: "幻神终极效能" power plan while the engine runs.

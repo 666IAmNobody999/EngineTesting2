@@ -339,6 +339,11 @@ bool Search::Worker::iterative_deepening() {
     int  failHighRecovery   = 0;
     bool uciPvSent          = false;
 
+    // Improved MultiPV 2: the time manager must judge the main line only. The
+    // second line's value and nodes would otherwise look like a falling eval
+    // and a less dominant best move, and make the search use more time.
+    u64 altNodes = 0;
+
     lowPlyHistory.fill(99);
 
     for (Color c : {WHITE, BLACK})
@@ -378,6 +383,8 @@ bool Search::Worker::iterative_deepening() {
         usize pvFirst = 0;
         pvLast        = rootMoves.size();
 
+        Value mainBestValue = -VALUE_INFINITE;
+
         if (!threads.increaseDepth)
             searchAgainCounter++;
 
@@ -409,6 +416,8 @@ bool Search::Worker::iterative_deepening() {
             }
 
             lastIterationIdxPV = rootMoves[pvIdx].previousPV;
+
+            const u64 lineStartNodes = nodes;
 
             // Reset UCI info selDepth for each depth and each PV line
             selDepth = 0;
@@ -488,6 +497,11 @@ bool Search::Worker::iterative_deepening() {
 
                 assert(alpha >= -VALUE_INFINITE && beta <= VALUE_INFINITE);
             }
+
+            if (!pvIdx)
+                mainBestValue = bestValue;
+            else if (altLine)
+                altNodes += nodes - lineStartNodes;
 
             // Gradually increase depth after reduced depth search
             if (failedHighCnt > 0 && !pvIdx)
@@ -628,10 +642,11 @@ bool Search::Worker::iterative_deepening() {
         // Do we have time for the next iteration? Can we stop searching now?
         if (limits.use_time_management() && !threads.stop && !mainThread->stopOnPonderhit)
         {
-            u64 nodesEffort = rootMoves[0].effort * 100000 / std::max(u64(1), u64(nodes));
+            const Value tmValue = altLine ? mainBestValue : bestValue;
+            u64 nodesEffort     = rootMoves[0].effort * 100000 / std::max(u64(1), u64(nodes) - altNodes);
 
-            double fallingEval = (16.93 + 2.73 * (mainThread->bestPreviousAverageScore - bestValue)
-                                  + 0.8 * (mainThread->iterValue[iterIdx] - bestValue))
+            double fallingEval = (16.93 + 2.73 * (mainThread->bestPreviousAverageScore - tmValue)
+                                  + 0.8 * (mainThread->iterValue[iterIdx] - tmValue))
                                / 100.0;
             fallingEval        = std::clamp(fallingEval, 0.610, 1.860);
 
@@ -680,7 +695,7 @@ bool Search::Worker::iterative_deepening() {
                 threads.increaseDepth = mainThread->ponder || elapsedTime <= totalTime * 0.26;
         }
 
-        mainThread->iterValue[iterIdx] = bestValue;
+        mainThread->iterValue[iterIdx] = altLine ? mainBestValue : bestValue;
         iterIdx                        = (iterIdx + 1) & 3;
     }
 
@@ -712,11 +727,69 @@ bool Search::Worker::iterative_deepening() {
         }
     }
 
+    // Draw play: see Attack::DrawPlayMinPly. Only the main thread decides (its
+    // move is the one played, thread voting is off in these modes), Skill Level
+    // already randomises, and only lines searched in this iteration that are
+    // not decisive and keep 0..DrawPlayMaxCp take part.
+    bool drawPlayed = false;
+    if ((Attack::human_like(attackMode) || attackMode == AttackMode::FORCED_DRAW)
+        && is_mainthread() && !skill.enabled() && rootPos.game_ply() >= Attack::DrawPlayMinPly
+        && rootMoves[0].score != -VALUE_INFINITE && !is_decisive(rootMoves[0].score))
+    {
+        const int bestCp = UCIEngine::to_cp_normalized(rootMoves[0].score, rootPos);
+
+        if (bestCp >= 0 && bestCp <= Attack::DrawPlayMaxCp)
+        {
+            static PRNG rng(u64(now()) | 1);
+
+            std::vector<int> weight(multiPV, 0);
+            int              total = 0;
+
+            for (usize i = 0; i < multiPV && rootMoves[i].score != -VALUE_INFINITE; ++i)
+            {
+                if (is_decisive(rootMoves[i].score))
+                    continue;
+                const int cp = UCIEngine::to_cp_normalized(rootMoves[i].score, rootPos);
+                if (cp < 0 || cp > Attack::DrawPlayMaxCp)
+                    continue;
+
+                const Move m = rootMoves[i].pv[0];
+                int        w = rootPos.capture(m) ? Attack::DrawPlayCaptureWeight : 1;
+
+                // A move that repeats a position judged a draw by the active rules
+                StateInfo st;
+                Value     result = VALUE_NONE;
+                rootPos.do_move(m, st, &tt);
+                if (rootPos.rule_judge(result, 1) && result == VALUE_DRAW)
+                    w = Attack::DrawPlayRepeatWeight;
+                rootPos.undo_move(m);
+
+                weight[i] = w;
+                total += w;
+            }
+
+            if (total > 0)
+            {
+                int   r      = int(rng.rand<unsigned>() % unsigned(total));
+                usize chosen = 0;
+                while (r >= weight[chosen])
+                    r -= weight[chosen++];
+
+                if (chosen)
+                {
+                    std::swap(rootMoves[0], rootMoves[chosen]);
+                    uciPvSent = false;  // the reported PV must match the played move
+                }
+                drawPlayed = true;
+            }
+        }
+    }
+
     // Forced Draw: play the searched root move whose score is closest to zero.
     // Only lines searched in this iteration (score != -VALUE_INFINITE) qualify,
     // so an aborted MultiPV loop never promotes an unsearched move. Ties go to
     // the higher score, then to the better-ranked move.
-    if (attackMode == AttackMode::FORCED_DRAW)
+    if (attackMode == AttackMode::FORCED_DRAW && !drawPlayed)
     {
         usize chosen = 0;
         for (usize i = 1; i < multiPV && rootMoves[i].score != -VALUE_INFINITE; ++i)
@@ -755,27 +828,69 @@ bool Search::Worker::iterative_deepening() {
         const int  minDropCp = shaped ? Attack::HumanMinDrop / 2 : Attack::HumanMinDrop;
         const int  maxDropCp = shaped ? Attack::HumanMaxDrop / 2 : Attack::HumanMaxDrop;
 
-        if (bestCp > Attack::HumanMinAdvantage && rng.rand<unsigned>() % Attack::HumanChance == 0)
+        // Pity timer: after HumanChance - 1 eligible moves in a row without a worse
+        // move, the next eligible move skips the random roll. If no move fits
+        // the drop window then, the window is widened so that the chosen move
+        // still keeps more than HumanMinAdvantage, and if all alternatives are
+        // less than minDropCp worse the worst of them is played. Only when no
+        // alternative exists at all is the counter kept for the next move.
+        int&       missed = main_manager()->humanMissed;
+        const bool forced = missed >= Attack::HumanChance - 1;
+        bool       played = false;
+
+        if (bestCp > Attack::HumanMinAdvantage
+            && (forced || rng.rand<unsigned>() % Attack::HumanChance == 0))
         {
-            usize chosen  = 0;
-            int   minDrop = maxDropCp + 1;
-            for (usize i = 1; i < multiPV && rootMoves[i].score != -VALUE_INFINITE; ++i)
-            {
-                if (is_decisive(rootMoves[i].score))
-                    continue;
-                const int drop = bestCp - UCIEngine::to_cp_normalized(rootMoves[i].score, rootPos);
-                if (drop >= minDropCp && drop < minDrop)
+            auto pick = [&](int maxDrop) {
+                usize chosenIdx = 0;
+                int   minDrop   = maxDrop + 1;
+                for (usize i = 1; i < multiPV && rootMoves[i].score != -VALUE_INFINITE; ++i)
                 {
-                    minDrop = drop;
-                    chosen  = i;
+                    if (is_decisive(rootMoves[i].score))
+                        continue;
+                    const int drop =
+                      bestCp - UCIEngine::to_cp_normalized(rootMoves[i].score, rootPos);
+                    if (drop >= minDropCp && drop < minDrop)
+                    {
+                        minDrop   = drop;
+                        chosenIdx = i;
+                    }
+                }
+                return chosenIdx;
+            };
+
+            usize chosen = pick(maxDropCp);
+            if (!chosen && forced)
+                chosen = pick(bestCp - Attack::HumanMinAdvantage - 1);
+
+            // Forced and every searched alternative is less than minDropCp
+            // worse: play the worst of them (largest drop) instead.
+            if (!chosen && forced)
+            {
+                int maxDrop = 0;
+                for (usize i = 1; i < multiPV && rootMoves[i].score != -VALUE_INFINITE; ++i)
+                {
+                    if (is_decisive(rootMoves[i].score))
+                        continue;
+                    const int drop =
+                      bestCp - UCIEngine::to_cp_normalized(rootMoves[i].score, rootPos);
+                    if (drop > maxDrop && drop < minDropCp)
+                    {
+                        maxDrop = drop;
+                        chosen  = i;
+                    }
                 }
             }
             if (chosen)
             {
                 std::swap(rootMoves[0], rootMoves[chosen]);
                 uciPvSent = false;
+                played    = true;
             }
         }
+
+        if (bestCp > Attack::HumanMinAdvantage)
+            missed = played ? 0 : missed + 1;
     }
 
     return uciPvSent;
@@ -855,7 +970,7 @@ void Search::Worker::do_move(Position&    pos,
 
     ++nodes;
 
-    Dirties& dirties = accumulatorStack.push();
+    Dirties& dirties = accumulatorStack.push(pos);
     pos.do_move(move, st, givesCheck, dirties, &tt, &sharedHistory);
 
     if (ss != nullptr)
@@ -886,6 +1001,9 @@ void Search::Worker::undo_null_move(Position& pos) { pos.undo_null_move(); }
 
 // Reset histories, usually before a new game
 void Search::Worker::clear() {
+    if (is_mainthread())
+        main_manager()->humanMissed = 0;
+
     mainHistory.fill(-5);
     captureHistory.fill(-604);
 

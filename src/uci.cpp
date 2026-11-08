@@ -218,9 +218,9 @@ void UCIEngine::loop() {
         }
         else if (token == "--help" || token == "help" || token == "--license" || token == "license")
             sync_cout
-              << "\n幻神引擎 (based on Pikafish) is a powerful xiangqi engine for playing and analyzing."
+              << to_output_codepage("\n幻神引擎 (based on Pikafish) is a powerful xiangqi engine for playing and analyzing."
                  "\nIt is normally used with a graphical user interface (GUI) and implements"
-                 "\nthe Universal Chess Interface (UCI) protocol to communicate with a GUI, an API, etc."
+                 "\nthe Universal Chess Interface (UCI) protocol to communicate with a GUI, an API, etc.")
               << sync_endl;
         else if (!token.empty() && token[0] != '#')
             sync_cout << "Unknown command: '" << cmd << "'. Type help for more information."

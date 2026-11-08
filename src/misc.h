@@ -73,6 +73,8 @@ using i128 = std::_Signed128;
 
 std::string engine_version_info();
 std::string engine_info(bool to_uci = false);
+// UTF-8 -> system ANSI code page when stdout is a pipe on Windows (see misc.cpp).
+std::string to_output_codepage(const std::string& utf8);
 std::string compiler_info();
 
 // Prefetch hint enums for explicit call-site control.

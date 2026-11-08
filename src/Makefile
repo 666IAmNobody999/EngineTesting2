@@ -59,7 +59,7 @@ else ifeq ($(COMP),mingw)
 	endif
 endif
 
-### Embed the NNUE nets (pikafish.nnue + pikafish_zero_test.nnue) in the binary.
+### Embed the NNUE net (pikafish.nnue) in the binary.
 ### Default: yes for Android (COMP=ndk) and Windows, no for every other target.
 ifeq ($(COMP),ndk)
 	embed ?= yes
@@ -677,7 +677,7 @@ ifeq ($(COMP),gcc)
 		profile_make = clang-profile-make
 		profile_use = clang-profile-use
 	else
-		gccmajorv := $(shell $(CXX) -dumpversion 2>/dev/null)
+		gccmajorv := $(shell $(CXX) -dumpversion 2>/dev/null | cut -f1 -d.)
 		CXXFLAGS += -Wstack-usage=128000 -fno-ipa-cp-clone
 	endif
 else ifeq ($(COMP),mingw)
@@ -718,7 +718,7 @@ else
 endif
 
 ### 3.2.1b Embedded nets (nnue/embedded_nets.S)
-EMBED_NETS = pikafish.nnue pikafish_zero_test.nnue
+EMBED_NETS = pikafish.nnue
 ifeq ($(embed),yes)
 	CXXFLAGS += -DNNUE_EMBEDDING
 endif
@@ -1333,9 +1333,12 @@ endif
 misc.o: misc.cpp $(BUILD_SHA_FILE) $(BUILD_DATE_FILE) $(BUILD_DIFFINDEX_FILE)
 	$(strip $(CXX) $(CPPFLAGS) $(CXXFLAGS) $(if $(GIT_SHA),-DGIT_SHA=$(GIT_SHA)) $(if $(GIT_DATE),-DGIT_DATE=$(GIT_DATE))) $(if $(GIT_DIFFINDEX),-DGIT_DIFFINDEX=$(GIT_DIFFINDEX)) -c -o $@ $<
 
+# HS_PGO_PROFILE_MAKE: only the instrumented PGO training binary may run a
+# bare `bench` without a licence; the final (profile-use / build) binary has
+# no such bypass. Only main.cpp / engine.cpp differ, the search is identical.
 clang-profile-make:
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) \
-	EXTRACXXFLAGS='-fprofile-generate -DHS_PGO_PROFILE_MAKE ' \
+	EXTRACXXFLAGS='-fprofile-generate -DHS_PGO_PROFILE_MAKE' \
 	EXTRALDFLAGS=' -fprofile-generate' \
 	all
 
@@ -1356,14 +1359,14 @@ gcc-profile-make:
 
 gcc-profile-use:
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) \
-	EXTRACXXFLAGS='-fprofile-use=profdir -fno-peel-loops -fno-tracer' \
+	EXTRACXXFLAGS='-fprofile-use=profdir -fno-peel-loops -fno-tracer -Wno-coverage-mismatch' \
 	EXTRACXXFLAGS+=$(EXTRAPROFILEFLAGS) \
 	EXTRALDFLAGS='-lgcov' \
 	all
 
 icx-profile-make:
 	$(MAKE) ARCH=$(ARCH) COMP=$(COMP) \
-	EXTRACXXFLAGS='-fprofile-instr-generate -DHS_PGO_PROFILE_MAKE ' \
+	EXTRACXXFLAGS='-fprofile-instr-generate -DHS_PGO_PROFILE_MAKE' \
 	EXTRALDFLAGS=' -fprofile-instr-generate' \
 	all
 
