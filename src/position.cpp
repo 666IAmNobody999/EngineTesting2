@@ -1321,7 +1321,8 @@ SkyChaseMap Position::sky_chased(Color c) {
 // Returns a ChaseMap that encodes (victim, attacker) id pairs, so that the
 // perpetual-chase accumulation in detect_chases can correctly verify that the
 // SAME attacker keeps chasing the SAME victim across the repetition cycle.
-// This is the shared "常捉无根子" detector used by AsianRule, SkyRule and YitianRule;
+// This is the shared "常捉无根子" detector used by AsianRule, SkyRule, YitianRule and
+// QiZheRule (which counts rooted victims too);
 // each rule still applies its own scoring on top of the resulting victim mask.
 ChaseMap Position::chased(Color c) {
 
@@ -1389,8 +1390,12 @@ ChaseMap Position::chased(Color c) {
             {
                 // See sky_chased(): only enter the real post-capture position when
                 // the victim's side has at least one potential recapturer.
+                // QiZheRule（棋者象棋）：攻击有根子及无根子均为“捉”，不作保护判断。
                 bool     trueChase  = true;
-                Bitboard recaptures = attackers_to(to, (pieces() ^ from) | to) & pieces(~sideToMove);
+                Bitboard recaptures =
+                  RuleConfig::repetitionRule == RuleConfig::RepetitionRule::QIZHE
+                    ? Bitboard(0)
+                    : attackers_to(to, (pieces() ^ from) | to) & pieces(~sideToMove);
                 if (recaptures)
                 {
                     const auto [captured, id] = do_move(m);
@@ -1431,7 +1436,7 @@ ChaseMap Position::chased(Color c) {
 
 
 // Calculates whether the side to move has a forced checking mate threat within the configured depth.
-// This is used only by ChineseRule.
+// This is used only by ChineseRule and QiZheRule.
 bool Position::has_mate_threat(Depth d) {
 
     if (d == -1)
@@ -1724,6 +1729,7 @@ Value Position::detect_chases(int d, int ply) {
     // victim mask is then consumed by each rule's own scoring below.
     const bool chineseLike = RuleConfig::chinese_like();
     const bool chineseRule = RuleConfig::repetitionRule == RR::CHINESE;
+    const bool qizheRule   = RuleConfig::repetitionRule == RR::QIZHE;
 
     // ChineseRule: 中国象棋协会《象棋竞赛规则》2020 版第 25~26 条的裁决框架，
     // 但"捉"统一采用天天象棋棋规（见 chased()）：
@@ -1736,7 +1742,14 @@ Value Position::detect_chases(int d, int ply) {
     //   26.1.2 走动帅应将而产生的捉、杀按闲处理。
     //   天天【一】1：一子或多子连续分捉多子不算捉 —— 本方所有捉着必须有共同的被捉子
     //          （victim id 交集非空），否则该方按闲处理。
-    if (chineseRule)
+    //
+    // QiZheRule（棋者象棋棋规，以亚规为基础）：禁著为长将、长捉、将捉循环、长杀、
+    // 一将一杀、一捉一杀，与上述 24.13 相同，故沿用同一裁决框架，只有两处不同：
+    //   捉：跟亚规定义（帅、兵不算捉；捉未过河兵、帅不算；受牵制子；同类子互捉），
+    //       但攻击有根子及无根子均为“捉”（见 chased()）。
+    //   杀：当前走的棋子造成杀才算杀 —— 走子后有杀势，而走子前（同一方行棋）
+    //       并无杀势；原已存在、非本着造成的杀势不算杀。
+    if (chineseRule || qizheRule)
     {
         bool hasIdle[COLOR_NB] = {false, false};
         u16  victims[COLOR_NB] = {0xFFFF, 0xFFFF};  // 本方捉着的共同被捉子
@@ -1770,10 +1783,15 @@ Value Position::detect_chases(int d, int ply) {
                 continue;
             }
 
-            ChaseMap   after = chased(mover);
-            const bool kill  = RuleConfig::mateThreatDepth > 0 && has_mate_threat();
+            ChaseMap after = chased(mover);
+            bool     kill  = RuleConfig::mateThreatDepth > 0 && has_mate_threat();
 
             step_back();
+
+            // QiZheRule: the threat must be created by this move (none before it,
+            // the mover being the side to move again after step_back()).
+            if (kill && qizheRule && has_mate_threat(0))
+                kill = false;
 
             if (kill)
                 continue;  // 杀（含杀兼捉）: forbidden, nothing more to record
@@ -2016,7 +2034,10 @@ bool Position::rule_judge(Value& result, int ply) {
     }
 
     // YitianRule 27：总步数（双方着法总数）达到 400 步判和；33：若一方被绝杀或困毙则不判和。
-    if (gamePly >= 400 && RuleConfig::repetitionRule == RuleConfig::RepetitionRule::YITIAN)
+    // QiZheRule：棋局到 400 步自动判和（同样不覆盖绝杀、困毙）。
+    if (gamePly >= 400
+        && (RuleConfig::repetitionRule == RuleConfig::RepetitionRule::YITIAN
+            || RuleConfig::repetitionRule == RuleConfig::RepetitionRule::QIZHE))
     {
         result = MoveList<ALL>(*this).size() ? VALUE_DRAW : mated_in(ply);
         apply_draw_rule(false);

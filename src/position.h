@@ -48,6 +48,7 @@ enum class RepetitionRule {
     SKY,
     COMPUTER,
     YITIAN,
+    QIZHE,
     ALLOW_CHASE,
     NO_JUDGEMENT
 };

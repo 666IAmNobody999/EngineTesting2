@@ -144,7 +144,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
 
     options.add(  //
       "Repetition Rule",
-      Option("SkyRule var SkyRule var AsianRule var YitianRule var ChineseRule var ComputerRule",
+      Option("SkyRule var SkyRule var AsianRule var YitianRule var ChineseRule var QiZheRule var ComputerRule",
              "SkyRule", [this](const Option& o) {
                  using RR = RuleConfig::RepetitionRule;
 
@@ -153,6 +153,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
                    : o == "SkyRule"    ? RR::SKY
                    : o == "ComputerRule" ? RR::COMPUTER
                    : o == "YitianRule" ? RR::YITIAN
+                   : o == "QiZheRule"  ? RR::QIZHE
                    : o == "AllowChase" ? RR::ALLOW_CHASE
                    : o == "NoJudgement" ? RR::NO_JUDGEMENT
                                         : RR::ASIAN;
@@ -168,9 +169,12 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
                  if (RuleConfig::repetitionRule == RR::ASIAN
                      || RuleConfig::repetitionRule == RR::SKY
 					 || RuleConfig::repetitionRule == RR::CHINESE
-                     || RuleConfig::repetitionRule == RR::YITIAN)
+                     || RuleConfig::repetitionRule == RR::YITIAN
+                     || RuleConfig::repetitionRule == RR::QIZHE)
                  {
-                     const char* rule60Ply = "120";
+                     // QiZheRule（棋者象棋）：自然著限 40 回合，即 80 步。
+                     const char* rule60Ply =
+                       RuleConfig::repetitionRule == RR::QIZHE ? "80" : "120";
 
                      if (auto it = options.options_map.find("Rule60MaxPly");
                          it != options.options_map.end())
@@ -216,9 +220,9 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
       }));
 
     options.add(  //
-      "Rule60MaxPly", Option(120, 90, 150, [](const Option& o) {
-          // Defaults to rule120 for every rule; freely adjustable between
-          // 90 and 150 plies.
+      "Rule60MaxPly", Option(120, 80, 150, [](const Option& o) {
+          // Defaults to rule120 for every rule (80 for QiZheRule); freely
+          // adjustable between 80 and 150 plies.
           RuleConfig::rule60MaxPly = int(o);
           RuleConfig::refresh_rule60();
           return std::nullopt;
