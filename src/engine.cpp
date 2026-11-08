@@ -192,7 +192,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
              }));
 
     options.add(  //
-      "Mate Threat Depth", Option(2, 0, 10, [](const Option& o) {
+      "Mate Threat Depth", Option(1, 0, 10, [](const Option& o) {
           RuleConfig::mateThreatDepth = int(o);
           return std::nullopt;
       }));
