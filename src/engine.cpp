@@ -22,7 +22,6 @@
 #include <cassert>
 #include <filesystem>
 #include <deque>
-#include <initializer_list>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -58,13 +57,10 @@ namespace {
 // no-op there.
 void force_process_priority() { WinPerf::apply_process_tuning(); }
 
-// NumaPolicy is a combo option; map its (case-insensitive) value to the exact
-// lower-case name used by the NUMA code. Anything unexpected falls back to auto.
-std::string numa_policy_name(const Option& o) {
-    for (const char* name : {"auto", "system", "hardware", "none"})
-        if (o == name)
-            return name;
-    return "auto";
+// EvalFile is a combo option; map its (case-insensitive) value to the exact
+// net file name. Anything unexpected falls back to the default net.
+std::string eval_file_name(const Option& o) {
+    return o == EvalFileZeroTestName ? EvalFileZeroTestName : EvalFileDefaultName;
 }
 
 }  // namespace
@@ -242,17 +238,16 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
                 Option(Search::Skill::LowestElo, Search::Skill::LowestElo, Search::Skill::HighestElo));
 
     options.add(  //
-      "EvalFile", Option(EvalFileDefaultName " var " EvalFileDefaultName, EvalFileDefaultName,
-                         [this](const Option&) {
-                             load_network(path_from_utf8(EvalFileDefaultName));
+      "EvalFile", Option(EvalFileDefaultName " var " EvalFileDefaultName " var " EvalFileZeroTestName,
+                         EvalFileDefaultName, [this](const Option& o) {
+                             load_network(path_from_utf8(eval_file_name(o)));
                              return std::nullopt;
                          }));
 	  
     options.add(  //
-      "NumaPolicy", Option("auto var auto var system var hardware var none", "auto",
-                           [this](const Option& o) {
-          if (!set_numa_config_from_option(numa_policy_name(o)))
-              return std::string("NumaPolicy: invalid value, keeping previous config.");
+      "NumaPolicy", Option("auto", [this](const Option& o) {
+          if (!set_numa_config_from_option(o))
+              return "NumaPolicy: invalid value '" + std::string(o) + "', keeping previous config.";
           return numa_config_information_as_string() + "\n"
                + thread_allocation_information_as_string();
       }));
@@ -298,8 +293,8 @@ void Engine::go(Search::LimitsType& limits) {
     std::string auth_msg;
     if (!HWIDLock::is_authorized(std::string(options["License Key"]), &auth_msg))
     {
-        sync_cout << "info string [授权失败] " << auth_msg << sync_endl;
-        sync_cout << "bestmove (none)" << sync_endl;
+        sync_cout << HS_STR("info string [授权失败] ") << auth_msg << sync_endl;
+        sync_cout << HS_STR("bestmove (none)") << sync_endl;
         return;
     }
 
@@ -417,7 +412,7 @@ void Engine::set_ponderhit(bool b) { threads.main_manager()->ponder = b; }
 // network related
 
 void Engine::verify_network() const {
-    const auto file = path_from_utf8(EvalFileDefaultName);
+    const auto file = path_from_utf8(eval_file_name(options["EvalFile"]));
     network->verify(onVerifyNetwork, networkFile, file);
 
     auto statuses = network.get_status_and_errors();

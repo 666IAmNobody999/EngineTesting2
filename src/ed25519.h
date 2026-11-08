@@ -503,6 +503,9 @@ inline bool verify(const std::uint8_t sig[SIGNATURE_BYTES],
 // Verify a detached Ed25519 signature and output a 64-bit cryptographic zero-proof.
 // zero_proof_out is 0 if and only if the curve point equation [s]B - [h]A == R holds across all 32 bytes.
 template<std::size_t MaxMsg = 256>
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
 inline bool verify_with_proof(const std::uint8_t  sig[SIGNATURE_BYTES],
                               const std::uint8_t* msg,
                               std::size_t         msgLen,
