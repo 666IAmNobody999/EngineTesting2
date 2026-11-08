@@ -30,7 +30,9 @@
 #include <utility>
 #include <vector>
 
+#include "bitboard.h"
 #include "evaluate.h"
+#include "movegen.h"
 #include "misc.h"
 #include "nnue/network.h"
 #include "nnue/nnue_common.h"
@@ -123,13 +125,8 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     options.add(  //
       "MultiPV", Option(1, 1, MAX_MOVES));
 
-    options.add(  //
-      "Search Algorithm",
-      Option("ImprovedMultiPV2 var ImprovedMultiPV2 var Original", "ImprovedMultiPV2",
-             [this](const Option&) {
-                 search_clear();
-                 return std::nullopt;
-             }));
+    // Search Algorithm is no longer an option: Improved MultiPV 2 when analysing,
+    // pondering or with Ponder on, Original otherwise (Search::Improved::parse).
 
     // Attack Mode: Best Move (normal) / Bare King / Forced Draw. The shaped values
     // of Bare King live in the transposition table, so switching modes clears it.
@@ -141,6 +138,19 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
                  search_clear();
                  return std::nullopt;
              }));
+
+    // Avoid_Repetition: in every mode except Forced Draw, a root move that
+    // repeats a position with no check / evasion in the cycle (idle repetition)
+    // is avoided unless every other move is mated. Forbidden perpetual checks
+    // or chases of the opponent are judged by the rules first and unaffected.
+    options.add(  //
+      "Avoid_Repetition", Option(true));
+
+    // Avoid_Sixty_Move_Draw: HumanLike / HumanLikeBareKing only. When materially
+    // ahead and the natural-move limit is a few plies away, only captures (or,
+    // without any, moves that offer the opponent a capture) are searched.
+    options.add(  //
+      "Avoid_Sixty_Move_Draw", Option(true));
 
     options.add(  //
       "Repetition Rule",
@@ -310,8 +320,83 @@ void Engine::go(Search::LimitsType& limits) {
         return;
     }
 
+    avoid_sixty_move_draw(limits);
     threads.start_thinking(pos, states, limits);
 }
+
+// Avoid_Sixty_Move_Draw (HumanLike / HumanLikeBareKing): with more material than
+// the opponent and at most SixtyWindow plies left before the natural-move draw,
+// restrict the root to captures; without a capture, to moves after which the
+// opponent can capture a piece (giving material away resets the counter too),
+// never our last attacking piece.
+// The search then picks the best of them. A forced mate (previous score) and an
+// explicit searchmoves list are left alone; at the very last ply only a capture
+// helps, so offers are not used there.
+void Engine::avoid_sixty_move_draw(Search::LimitsType& limits) {
+    constexpr int SixtyWindow = 6;
+
+    if (!limits.searchmoves.empty() || limits.forceImproved || !options["Avoid_Sixty_Move_Draw"]
+        || !Search::Attack::human_like(Search::Attack::parse(options)))
+        return;
+
+    const int left = RuleConfig::rule60Limit - pos.rule60_count();
+    if (RuleConfig::rule60Limit >= RuleConfig::RULE60_UNLIMITED || left > SixtyWindow || left < 1)
+        return;
+
+    const Value prev = threads.main_manager()->bestPreviousScore;
+    if (prev != VALUE_INFINITE && is_win(prev))
+        return;
+
+    auto material = [&](Color c) {
+        Value    v = VALUE_ZERO;
+        Bitboard b = pos.pieces(c);
+        while (b)
+            v += PieceValue[pos.piece_on(pop_lsb(b))];
+        return v;
+    };
+    const Color us = pos.side_to_move();
+    if (material(us) <= material(~us))
+        return;
+
+    std::vector<std::string> captures, offers;
+    for (const auto& m : MoveList<ALL>(pos))
+    {
+        if (pos.capture(m))
+        {
+            captures.push_back(UCIEngine::move(m));
+            continue;
+        }
+        if (left < 2 || !captures.empty())
+            continue;
+
+        // The offered piece must not be our last attacking piece (rook, knight,
+        // cannon or pawn): losing it would turn the draw into a lost game.
+        StateInfo st;
+        pos.do_move(m, st);
+        const int attackers = popcount(pos.pieces(us) & pos.pieces(ROOK, KNIGHT, CANNON, PAWN));
+        bool      offer     = false;
+        for (const auto& r : MoveList<ALL>(pos))
+            if (pos.capture(r))
+            {
+                const PieceType pt = type_of(pos.piece_on(r.to_sq()));
+                if (attackers > 1 || pt == ADVISOR || pt == BISHOP)
+                {
+                    offer = true;
+                    break;
+                }
+            }
+        pos.undo_move(m);
+
+        if (offer)
+            offers.push_back(UCIEngine::move(m));
+    }
+
+    if (!captures.empty())
+        limits.searchmoves = std::move(captures);
+    else if (!offers.empty())
+        limits.searchmoves = std::move(offers);
+}
+
 void Engine::stop() { threads.stop = true; }
 
 // Windows: other processes whose name contains "pikafish" (same user, not this

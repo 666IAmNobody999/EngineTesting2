@@ -383,6 +383,7 @@ void UCIEngine::bench(std::istream& args) {
             if (token == "go")
             {
                 Search::LimitsType limits = parse_limits(is);
+                limits.forceImproved      = true;
 
                 if (limits.perft)
                     nodesSearched = perft(limits);

@@ -1925,6 +1925,31 @@ Value Position::detect_chases(int d, int ply) {
 
 // Tests whether the position may end the game by rule 60, insufficient material, draw repetition,
 // perpetual check repetition or perpetual chase repetition that allows a player to claim a game result.
+// Avoid_Repetition: true when the current position repeats an earlier one and
+// no position of that cycle has a side in check (no 将 / 应将 in the cycle).
+// Only called at the root children after rule_judge() returned a draw, so it
+// costs nothing on the normal search path.
+bool Position::idle_repetition() const {
+    int end = std::min(st->rule60 + std::max(0, st->check10[WHITE] - 10)
+                         + std::max(0, st->check10[BLACK] - 10),
+                       st->pliesFromNull);
+    if (end < 4)
+        return false;
+
+    bool             idle = !st->checkersBB;
+    const StateInfo* stp  = st;
+    for (int i = 1; i <= end; ++i)
+    {
+        stp = stp->previous;
+        idle &= !stp->checkersBB;
+        if (!idle)
+            return false;
+        if (i >= 4 && !(i & 1) && stp->key == st->key)
+            return true;
+    }
+    return false;
+}
+
 bool Position::rule_judge(Value& result, int ply) {
 
     using RR = RuleConfig::RepetitionRule;

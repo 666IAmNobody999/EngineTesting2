@@ -119,6 +119,7 @@ class Engine {
     std::string                          thread_binding_information_as_string() const;
 
    private:
+    void avoid_sixty_move_draw(Search::LimitsType& limits);
     const std::filesystem::path binaryDirectory;
 
     NumaReplicationContext numaContext;

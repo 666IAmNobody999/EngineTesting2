@@ -316,6 +316,8 @@ bool Search::Worker::iterative_deepening() {
 
     rootColor  = rootPos.side_to_move();
     attackMode = Attack::parse(options);
+    // Forced Draw looks for draws on purpose, so it keeps repetitions.
+    avoidRepetition = bool(options["Avoid_Repetition"]) && attackMode != AttackMode::FORCED_DRAW;
 
     // Forced Draw picks, among several root moves, the one closest to a draw.
     if (attackMode == AttackMode::FORCED_DRAW)
@@ -329,7 +331,7 @@ bool Search::Worker::iterative_deepening() {
 
     // Improved MultiPV 2: a depth-capped, unprinted second line next to the main
     // line, searched by the main thread only (helper threads keep full speed).
-    const bool altLine = Improved::parse(options) == SearchAlgorithm::IMPROVED_MULTIPV2
+    const bool altLine = Improved::parse(options, limits) == SearchAlgorithm::IMPROVED_MULTIPV2
                       && multiPV == 1 && !skill.enabled() && rootMoves.size() > 1
                       && is_mainthread();
     altScore      = -VALUE_INFINITE;
@@ -1095,8 +1097,15 @@ Value Search::Worker::search(
         // Step 2. Check for aborted search or repetition
         Value result = VALUE_NONE;
         if (pos.rule_judge(result, ss->ply))
-            return result == VALUE_DRAW ? value_draw(nodes)
-                                        : attack_shape_win(result, pos, ss->ply);
+        {
+            if (result != VALUE_DRAW)
+                return attack_shape_win(result, pos, ss->ply);
+            // Avoid_Repetition: a root move that repeats a position without
+            // check or evasion in the cycle is scored just short of a mate.
+            if (ss->ply == 1 && avoidRepetition && pos.idle_repetition())
+                return Attack::AvoidRepetitionValue;
+            return value_draw(nodes);
+        }
         if (result != VALUE_NONE)
         {
             assert(result != VALUE_DRAW);
@@ -1972,7 +1981,11 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     // Step 2. Check for repetition or maximum ply reached
     Value result = VALUE_NONE;
     if (pos.rule_judge(result, ss->ply))
+    {
+        if (result == VALUE_DRAW && ss->ply == 1 && avoidRepetition && pos.idle_repetition())
+            return Attack::AvoidRepetitionValue;
         return attack_shape_win(result, pos, ss->ply);
+    }
     if (result != VALUE_NONE)
     {
         assert(result != VALUE_DRAW);
@@ -2190,9 +2203,10 @@ Value Search::Worker::evaluate(const Position& pos) {
 }
 
 
-SearchAlgorithm Search::Improved::parse(const OptionsMap& options) {
-    return options["Search Algorithm"] == "Original" ? SearchAlgorithm::ORIGINAL
-                                                     : SearchAlgorithm::IMPROVED_MULTIPV2;
+SearchAlgorithm Search::Improved::parse(const OptionsMap& options, const LimitsType& limits) {
+    return limits.infinite || limits.ponderMode || limits.forceImproved || bool(options["Ponder"])
+           ? SearchAlgorithm::IMPROVED_MULTIPV2
+           : SearchAlgorithm::ORIGINAL;
 }
 
 AttackMode Search::Attack::parse(const OptionsMap& options) {

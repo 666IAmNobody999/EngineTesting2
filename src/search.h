@@ -208,16 +208,26 @@ enum class SearchAlgorithm {
     ORIGINAL
 };
 
+struct LimitsType;
+
 namespace Improved {
 constexpr Depth AltMaxDepth    = 20;   // depth cap of the second line
 constexpr int   AltWindowCp    = 150;  // second line skipped when this far behind (cp)
 constexpr Depth AltRecheckEvery = 4;   // ... but re-checked at least every N plies
 constexpr int   AltMaxAdvantageCp = 24000;  // no second line once the main line is this far ahead
 
-SearchAlgorithm parse(const OptionsMap& options);
+// Chosen automatically (no UCI option): Improved MultiPV 2 when analysing
+// (go infinite), pondering (go ponder) or with the Ponder option on, and for
+// bench; Original otherwise (playing without pondering).
+SearchAlgorithm parse(const OptionsMap& options, const LimitsType& limits);
 }
 
 namespace Attack {
+// Avoid_Repetition: value (for the side to move at ply 1) of a root move that
+// repeats a position with no check / evasion in the cycle. Far above any
+// evaluation or Bare King shaping, but below the mate range, so the root only
+// plays such a move when every other move is mated.
+constexpr Value AvoidRepetitionValue = 20000;
 // Which behaviours a mode switches on
 constexpr bool bare_king(AttackMode m) {
     return m == AttackMode::BARE_KING || m == AttackMode::HUMAN_LIKE_BARE_KING;
@@ -300,7 +310,7 @@ struct LimitsType {
         time[WHITE] = time[BLACK] = inc[WHITE] = inc[BLACK] = npmsec = movetime = TimePoint(0);
         movestogo = depth = mate = perft = infinite = 0;
         nodes                                       = 0;
-        ponderMode                                  = false;
+        ponderMode = forceImproved = false;
     }
 
     bool use_time_management() const { return time[WHITE] || time[BLACK]; }
@@ -310,6 +320,7 @@ struct LimitsType {
     int                      movestogo, depth, mate, perft, infinite;
     u64                      nodes;
     bool                     ponderMode;
+    bool                     forceImproved;  // bench: always Improved MultiPV 2
 };
 
 
@@ -489,6 +500,7 @@ class Worker {
     Depth     rootDepth;
     Color     rootColor  = WHITE;
     AttackMode attackMode = AttackMode::BEST_MOVE;
+    bool       avoidRepetition = false;
 
     // Bare King helpers (see AttackMode). Both are no-ops in BEST_MOVE mode.
     Value attack_shape_eval(Value v, const Position& pos) const;
