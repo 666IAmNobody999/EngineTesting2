@@ -1370,15 +1370,15 @@ ChaseMap Position::chased(Color c) {
                      | (pieces(~sideToMove, PAWN) & HalfBB[sideToMove]);
 
         // Rooks chased regardless of protection.
-        // ChineseRule / QiZheRule（天天象棋棋规【三】1）：除车、兵外其他子捉车，无论车是否有根，算捉。
-        // AsianRule（亚象联棋例总纲 6、细则 15/20/21/37）/ YiTianRule（弈天规则 14）：
+        // ChineseRule（天天象棋棋规【三】1）：除车、兵外其他子捉车，无论车是否有根，算捉。
+        // AsianRule（亚象联棋例总纲 6、细则 15/20/21/37）/ YiTianRule（弈天规则 14）/
+        // QiZheRule（棋者象棋棋规：长捉和亚规相同）：
         // 只有马或炮捉有根车仍算捉；士、象捉有真根之车属“长捉真根子作和”。
         // （车捉车走同类子路径；帅兵不在 attackers 之内。）
         Bitboard candidates =
           (attackerType == KNIGHT || attackerType == CANNON
            || (attackerType != ROOK
-               && (RuleConfig::repetitionRule == RuleConfig::RepetitionRule::CHINESE
-                   || RuleConfig::repetitionRule == RuleConfig::RepetitionRule::QIZHE)))
+               && RuleConfig::repetitionRule == RuleConfig::RepetitionRule::CHINESE))
             ? attacks & pieces(~sideToMove, ROOK)
             : 0;
 
