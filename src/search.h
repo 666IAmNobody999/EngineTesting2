@@ -216,9 +216,8 @@ constexpr int   AltWindowCp    = 150;  // second line skipped when this far behi
 constexpr Depth AltRecheckEvery = 4;   // ... but re-checked at least every N plies
 constexpr int   AltMaxAdvantageCp = 24000;  // no second line once the main line is this far ahead
 
-// Chosen automatically (no UCI option): Improved MultiPV 2 when analysing
-// (go infinite), pondering (go ponder) or with the Ponder option on, and for
-// bench; Original otherwise (playing without pondering).
+// No UCI option: Improved MultiPV 2 is always used, whether pondering or not
+// (Original remains only as the plain search it falls back to, e.g. MultiPV > 1).
 SearchAlgorithm parse(const OptionsMap& options, const LimitsType& limits);
 }
 

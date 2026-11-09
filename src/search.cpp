@@ -2217,9 +2217,9 @@ Value Search::Worker::evaluate(const Position& pos) {
 
 
 SearchAlgorithm Search::Improved::parse(const OptionsMap& options, const LimitsType& limits) {
-    return limits.infinite || limits.ponderMode || limits.forceImproved || bool(options["Ponder"])
-           ? SearchAlgorithm::IMPROVED_MULTIPV2
-           : SearchAlgorithm::ORIGINAL;
+    (void) options;
+    (void) limits;
+    return SearchAlgorithm::IMPROVED_MULTIPV2;
 }
 
 AttackMode Search::Attack::parse(const OptionsMap& options) {
