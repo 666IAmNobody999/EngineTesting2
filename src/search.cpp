@@ -334,6 +334,11 @@ bool Search::Worker::iterative_deepening() {
     const bool altLine = Improved::parse(options, limits) == SearchAlgorithm::IMPROVED_MULTIPV2
                       && multiPV == 1 && !skill.enabled() && rootMoves.size() > 1
                       && is_mainthread();
+
+    // Tell the GUI which search is actually used for this go (not in bench).
+    if (is_mainthread() && !limits.forceImproved)
+        sync_cout << "info string Search Algorithm: "
+                  << (altLine ? "ImprovedMultiPV2" : "Original") << sync_endl;
     altScore      = -VALUE_INFINITE;
     altScoreDepth = 0;
 
