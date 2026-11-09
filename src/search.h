@@ -193,13 +193,14 @@ enum class AttackMode {
 // Search Algorithm option (used when MultiPV is 1 and no Skill / Attack mode
 // needs more lines; otherwise the plain search, "Original", is used).
 //   IMPROVED_MULTIPV3 (default): the main thread searches two extra root lines
-//                 as in MultiPV 3, their depth capped at AltMaxDepth. Up to the
+//                 as in MultiPV 3, their depth capped at AltMaxDepthV3. Up to the
 //                 cap the 2nd and 3rd best moves are examined with a full window
 //                 instead of a reduced null window; beyond the cap the two lines
 //                 take turns over the 2nd, 3rd, 4th, 5th ... root moves, one move
 //                 each per iteration, at the capped depth.
-//   IMPROVED_MULTIPV2 : the same with one extra line (MultiPV 2), which beyond
-//                 the cap takes turns over the 2nd, 3rd, 4th ... root moves.
+//   IMPROVED_MULTIPV2 : one extra line as in MultiPV 2, its depth capped at
+//                 AltMaxDepthV2; beyond the cap it only re-verifies its own move
+//                 (the best alternative found up to the cap) at the capped depth.
 // The extra lines are not printed (GUIs and cloud front ends expect one line)
 // and each is skipped while it is known to be more than AltWindowCp behind the
 // main line or while the main line is already clearly winning. Promotion of an
@@ -213,7 +214,8 @@ enum class SearchAlgorithm {
 struct LimitsType;
 
 namespace Improved {
-constexpr Depth AltMaxDepth    = 20;   // depth cap of the second line
+constexpr Depth AltMaxDepthV3  = 20;   // depth cap of the extra lines (Improved MultiPV 3)
+constexpr Depth AltMaxDepthV2  = 15;   // depth cap of the extra line (Improved MultiPV 2)
 constexpr int   AltWindowCp    = 150;  // second line skipped when this far behind (cp)
 constexpr Depth AltRecheckEvery = 4;   // ... but re-checked at least every N plies
 constexpr int   AltMaxAdvantageCp = 24000;  // no second line once the main line is this far ahead

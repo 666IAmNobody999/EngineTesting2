@@ -337,6 +337,11 @@ bool Search::Worker::iterative_deepening() {
     const usize altLines = !altLine ? 0
                          : std::min(algo == SearchAlgorithm::IMPROVED_MULTIPV3 ? usize(3) : usize(2),
                                     rootMoves.size());
+    // Depth cap of the extra lines, and whether they rotate over the root moves
+    // beyond it (Improved MultiPV 3 only).
+    const Depth altCap    = algo == SearchAlgorithm::IMPROVED_MULTIPV3 ? Improved::AltMaxDepthV3
+                                                                       : Improved::AltMaxDepthV2;
+    const bool  altRotate = algo == SearchAlgorithm::IMPROVED_MULTIPV3;
 
     // Tell the GUI which search is actually used for this go (not in bench).
     if (is_mainthread() && !limits.forceImproved)
@@ -381,7 +386,7 @@ bool Search::Worker::iterative_deepening() {
             uciPvSent = false;
 
         // Lines searched in this iteration. Improved MultiPV 2 / 3 add one / two
-        // extra lines whose depth is capped at AltMaxDepth.
+        // extra lines whose depth is capped at altCap.
         const usize lines = altLine ? altLines : multiPV;
 
         // Save the last iteration's scores before the first PV line is searched and
@@ -411,7 +416,7 @@ bool Search::Worker::iterative_deepening() {
             // capped depth: searching all the other root moves again would cost a
             // full MultiPV iteration, because their transposition table bounds from
             // the main line do not match the extra line's window.
-            pvLast = altLine && pvIdx && rootDepth > Improved::AltMaxDepth ? pvIdx + 1
+            pvLast = altLine && pvIdx && rootDepth > altCap ? pvIdx + 1
                                                                             : rootMoves.size();
 
             // Skip the second line while the main line is already clearly winning, or
@@ -432,10 +437,10 @@ bool Search::Worker::iterative_deepening() {
                 // Beyond the cap the extra lines take turns over the 2nd, 3rd, 4th
                 // ... root moves (one move per line and iteration), so that moves
                 // the main line has ranked low are re-examined with a full window.
-                if (rootDepth > Improved::AltMaxDepth && rootMoves.size() > lines)
+                if (altRotate && rootDepth > altCap && rootMoves.size() > lines)
                 {
                     pvIdx = 1
-                          + (usize(rootDepth - Improved::AltMaxDepth) * (lines - 1) + lineNo - 1)
+                          + (usize(rootDepth - altCap) * (lines - 1) + lineNo - 1)
                               % (rootMoves.size() - 1);
                     pvLast = pvIdx + 1;
                 }
@@ -474,7 +479,7 @@ bool Search::Worker::iterative_deepening() {
                                                     - 3 * (searchAgainCounter + 1) / 4);
                 // The second line of Improved MultiPV 2 never goes beyond the cap
                 if (altLine && pvIdx)
-                    adjustedDepth = std::min(adjustedDepth, Improved::AltMaxDepth);
+                    adjustedDepth = std::min(adjustedDepth, altCap);
                 rootDelta = beta - alpha;
                 bestValue           = search<Root>(rootPos, ss, alpha, beta, adjustedDepth, false);
 
@@ -585,7 +590,7 @@ bool Search::Worker::iterative_deepening() {
             // Sort the PV lines searched so far and update the GUI. A depth-capped
             // second line must never overtake the deeper main line on its score:
             // promotion is left to the next iteration's full-depth search.
-            if (!(altLine && pvIdx && rootDepth > Improved::AltMaxDepth))
+            if (!(altLine && pvIdx && rootDepth > altCap))
                 std::stable_sort(rootMoves.begin() + pvFirst, rootMoves.begin() + pvIdx + 1);
 
             // The second line of Improved MultiPV 2 is not printed: the main line is
@@ -593,7 +598,7 @@ bool Search::Worker::iterative_deepening() {
             const usize lastShown = altLine ? 0 : lines - 1;
 
             if (altLine && pvIdx && !threads.stop
-                && !(rootDepth > Improved::AltMaxDepth && rootMoves.size() > lines))
+                && !(altRotate && rootDepth > altCap && rootMoves.size() > lines))
             {
                 altScore[lineNo]      = rootMoves[pvIdx].score;
                 altScoreDepth[lineNo] = rootDepth;
