@@ -125,8 +125,15 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     options.add(  //
       "MultiPV", Option(1, 1, MAX_MOVES));
 
-    // Search Algorithm is no longer an option: Improved MultiPV 2 is always used
+    // Search Algorithm: ImprovedMultiPV3 (default) / ImprovedMultiPV2
     // (Search::Improved::parse).
+    options.add(  //
+      "Search Algorithm",
+      Option("ImprovedMultiPV3 var ImprovedMultiPV3 var ImprovedMultiPV2", "ImprovedMultiPV3",
+             [this](const Option&) {
+                 search_clear();
+                 return std::nullopt;
+             }));
 
     // Attack Mode: Best Move (normal) / Bare King / Forced Draw. The shaped values
     // of Bare King live in the transposition table, so switching modes clears it.

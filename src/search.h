@@ -190,22 +190,24 @@ enum class AttackMode {
     FORCED_DRAW
 };
 
-// Search Algorithm option.
-//   ORIGINAL          : plain iterative deepening, MultiPV as configured.
-//   IMPROVED_MULTIPV2 : when MultiPV is 1 (and no Skill / Attack mode needs more
-//                 lines) the main thread searches a second root line as in
-//                 MultiPV 2, but its depth is capped at AltMaxDepth. Up to the cap
-//                 the second best move is examined with a full window instead of a
-//                 reduced null window; beyond the cap only the second line's own
-//                 move is re-verified at the capped depth. The second line is not
-//                 printed (GUIs and cloud front ends expect one line) and it is
-//                 skipped while it is known to be more than AltWindowCp behind the
-//                 main line or while the main line is already clearly winning. Promotion of the second line happens through the
-//                 normal principal variation search of the next iteration, which
-//                 is the only sound judge between scores of different depths.
+// Search Algorithm option (used when MultiPV is 1 and no Skill / Attack mode
+// needs more lines; otherwise the plain search, "Original", is used).
+//   IMPROVED_MULTIPV3 (default): the main thread searches two extra root lines
+//                 as in MultiPV 3, their depth capped at AltMaxDepth. Up to the
+//                 cap the 2nd and 3rd best moves are examined with a full window
+//                 instead of a reduced null window; beyond the cap the two lines
+//                 take turns over the 2nd, 3rd, 4th, 5th ... root moves, one move
+//                 each per iteration, at the capped depth.
+//   IMPROVED_MULTIPV2 : the same with one extra line (MultiPV 2), which beyond
+//                 the cap takes turns over the 2nd, 3rd, 4th ... root moves.
+// The extra lines are not printed (GUIs and cloud front ends expect one line)
+// and each is skipped while it is known to be more than AltWindowCp behind the
+// main line or while the main line is already clearly winning. Promotion of an
+// extra line happens through the normal principal variation search of the next
+// iteration, which is the only sound judge between scores of different depths.
 enum class SearchAlgorithm {
-    IMPROVED_MULTIPV2,
-    ORIGINAL
+    IMPROVED_MULTIPV3,
+    IMPROVED_MULTIPV2
 };
 
 struct LimitsType;
@@ -216,9 +218,9 @@ constexpr int   AltWindowCp    = 150;  // second line skipped when this far behi
 constexpr Depth AltRecheckEvery = 4;   // ... but re-checked at least every N plies
 constexpr int   AltMaxAdvantageCp = 24000;  // no second line once the main line is this far ahead
 
-// No UCI option: Improved MultiPV 2 is always used, whether pondering or not
-// (Original remains only as the plain search it falls back to, e.g. MultiPV > 1).
-SearchAlgorithm parse(const OptionsMap& options, const LimitsType& limits);
+constexpr usize MaxLines       = 3;    // main line + up to two extra lines
+
+SearchAlgorithm parse(const OptionsMap& options);
 }
 
 namespace Attack {
@@ -319,7 +321,7 @@ struct LimitsType {
     int                      movestogo, depth, mate, perft, infinite;
     u64                      nodes;
     bool                     ponderMode;
-    bool                     forceImproved;  // bench: always Improved MultiPV 2
+    bool                     forceImproved;  // bench: no info string Search Algorithm
 };
 
 
@@ -486,8 +488,8 @@ class Worker {
     LimitsType limits;
 
     usize              pvIdx, pvLast;
-    Value              altScore      = -VALUE_INFINITE;  // last exact score of the second line
-    Depth              altScoreDepth = 0;                // ... and the iteration it was obtained in
+    Value altScore[Improved::MaxLines]      = {};  // last exact score of each extra line
+    Depth altScoreDepth[Improved::MaxLines] = {};  // ... and the iteration it was obtained in
     RelaxedAtomic<u64> nodes, bestMoveChanges;
     int                selDepth, nmpMinPly;
 

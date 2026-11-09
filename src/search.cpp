@@ -329,18 +329,24 @@ bool Search::Worker::iterative_deepening() {
 
     multiPV = std::min(multiPV, rootMoves.size());
 
-    // Improved MultiPV 2: a depth-capped, unprinted second line next to the main
+    // Improved MultiPV 2 / 3: depth-capped, unprinted extra lines next to the main
     // line, searched by the main thread only (helper threads keep full speed).
-    const bool altLine = Improved::parse(options, limits) == SearchAlgorithm::IMPROVED_MULTIPV2
-                      && multiPV == 1 && !skill.enabled() && rootMoves.size() > 1
+    const SearchAlgorithm algo    = Improved::parse(options);
+    const bool            altLine = multiPV == 1 && !skill.enabled() && rootMoves.size() > 1
                       && is_mainthread();
+    const usize altLines = !altLine ? 0
+                         : std::min(algo == SearchAlgorithm::IMPROVED_MULTIPV3 ? usize(3) : usize(2),
+                                    rootMoves.size());
 
     // Tell the GUI which search is actually used for this go (not in bench).
     if (is_mainthread() && !limits.forceImproved)
         sync_cout << "info string Search Algorithm: "
-                  << (altLine ? "ImprovedMultiPV2" : "Original") << sync_endl;
-    altScore      = -VALUE_INFINITE;
-    altScoreDepth = 0;
+                  << (!altLine                                      ? "Original"
+                      : algo == SearchAlgorithm::IMPROVED_MULTIPV3 ? "ImprovedMultiPV3"
+                                                                    : "ImprovedMultiPV2")
+                  << sync_endl;
+    for (usize k = 0; k < Improved::MaxLines; ++k)
+        altScore[k] = -VALUE_INFINITE, altScoreDepth[k] = 0;
 
     int  searchAgainCounter = 0;
     int  failHighRecovery   = 0;
@@ -374,9 +380,9 @@ bool Search::Worker::iterative_deepening() {
         if (mainThread)
             uciPvSent = false;
 
-        // Lines searched in this iteration. Improved MultiPV 2 adds a second line
-        // whose depth is capped at AltMaxDepth.
-        const usize lines = altLine ? 2 : multiPV;
+        // Lines searched in this iteration. Improved MultiPV 2 / 3 add one / two
+        // extra lines whose depth is capped at AltMaxDepth.
+        const usize lines = altLine ? altLines : multiPV;
 
         // Save the last iteration's scores before the first PV line is searched and
         // all the move scores except the (new) PV are set to -VALUE_INFINITE.
@@ -396,13 +402,15 @@ bool Search::Worker::iterative_deepening() {
             searchAgainCounter++;
 
         // MultiPV loop: we perform a full root search for each PV line
-        for (pvIdx = 0; pvIdx < lines; ++pvIdx)
+        usize lineNo = 0;
+        for (; lineNo < lines; ++lineNo)
         {
-            // Beyond the depth cap the second line only re-verifies its own move
-            // (the best alternative found up to the cap): searching all the other
-            // root moves again at the capped depth would cost a full MultiPV 2
-            // iteration, because their transposition table bounds from the main
-            // line do not match the second line's window.
+            pvIdx = lineNo;
+
+            // Beyond the depth cap an extra line searches a single root move at the
+            // capped depth: searching all the other root moves again would cost a
+            // full MultiPV iteration, because their transposition table bounds from
+            // the main line do not match the extra line's window.
             pvLast = altLine && pvIdx && rootDepth > Improved::AltMaxDepth ? pvIdx + 1
                                                                             : rootMoves.size();
 
@@ -415,11 +423,22 @@ bool Search::Worker::iterative_deepening() {
             {
                 const int mainCp = UCIEngine::to_cp_normalized(rootMoves[0].score, rootPos);
                 if (mainCp > Improved::AltMaxAdvantageCp
-                    || (altScore != -VALUE_INFINITE
-                        && altScoreDepth > rootDepth - Improved::AltRecheckEvery
-                        && mainCp - UCIEngine::to_cp_normalized(altScore, rootPos)
+                    || (altScore[lineNo] != -VALUE_INFINITE
+                        && altScoreDepth[lineNo] > rootDepth - Improved::AltRecheckEvery
+                        && mainCp - UCIEngine::to_cp_normalized(altScore[lineNo], rootPos)
                              > Improved::AltWindowCp))
                     continue;
+
+                // Beyond the cap the extra lines take turns over the 2nd, 3rd, 4th
+                // ... root moves (one move per line and iteration), so that moves
+                // the main line has ranked low are re-examined with a full window.
+                if (rootDepth > Improved::AltMaxDepth && rootMoves.size() > lines)
+                {
+                    pvIdx = 1
+                          + (usize(rootDepth - Improved::AltMaxDepth) * (lines - 1) + lineNo - 1)
+                              % (rootMoves.size() - 1);
+                    pvLast = pvIdx + 1;
+                }
             }
 
             lastIterationIdxPV = rootMoves[pvIdx].previousPV;
@@ -573,10 +592,11 @@ bool Search::Worker::iterative_deepening() {
             // output as soon as it is complete, exactly as with MultiPV 1.
             const usize lastShown = altLine ? 0 : lines - 1;
 
-            if (altLine && pvIdx && !threads.stop)
+            if (altLine && pvIdx && !threads.stop
+                && !(rootDepth > Improved::AltMaxDepth && rootMoves.size() > lines))
             {
-                altScore      = rootMoves[pvIdx].score;
-                altScoreDepth = rootDepth;
+                altScore[lineNo]      = rootMoves[pvIdx].score;
+                altScoreDepth[lineNo] = rootDepth;
             }
 
             if (mainThread && !threads.stop && pvIdx <= lastShown
@@ -589,6 +609,10 @@ bool Search::Worker::iterative_deepening() {
             if (threads.stop)
                 break;
         }
+
+        // A rotated extra line leaves pvIdx on the move it searched
+        if (lineNo == lines)
+            pvIdx = lines;
 
         const bool forgottenMate = lastBestMoveScore != -VALUE_INFINITE
                                 && is_decisive(lastBestMoveScore)
@@ -2216,10 +2240,9 @@ Value Search::Worker::evaluate(const Position& pos) {
 }
 
 
-SearchAlgorithm Search::Improved::parse(const OptionsMap& options, const LimitsType& limits) {
-    (void) options;
-    (void) limits;
-    return SearchAlgorithm::IMPROVED_MULTIPV2;
+SearchAlgorithm Search::Improved::parse(const OptionsMap& options) {
+    return options["Search Algorithm"] == "ImprovedMultiPV2" ? SearchAlgorithm::IMPROVED_MULTIPV2
+                                                             : SearchAlgorithm::IMPROVED_MULTIPV3;
 }
 
 AttackMode Search::Attack::parse(const OptionsMap& options) {
