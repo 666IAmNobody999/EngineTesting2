@@ -840,7 +840,15 @@ bool Search::Worker::iterative_deepening() {
         const bool forced = missed >= Attack::HumanChance - 1;
         bool       played = false;
 
-        if (bestCp > Attack::HumanMinAdvantage
+        // Recapture: the opponent has just captured and the best move captures
+        // back (e.g. in the middle of an exchange). A human always takes back
+        // here, so no worse move is played and this move is not counted by the
+        // pity timer either: when the forced move falls on it, the next
+        // eligible move is forced instead.
+        const bool recapture = rootPos.captured_piece() != NO_PIECE
+                            && rootPos.capture(rootMoves[0].pv[0]);
+
+        if (bestCp > Attack::HumanMinAdvantage && !recapture
             && (forced || rng.rand<unsigned>() % Attack::HumanChance == 0))
         {
             auto pick = [&](int maxDrop) {
@@ -891,7 +899,7 @@ bool Search::Worker::iterative_deepening() {
             }
         }
 
-        if (bestCp > Attack::HumanMinAdvantage)
+        if (bestCp > Attack::HumanMinAdvantage && !recapture)
             missed = played ? 0 : missed + 1;
     }
 
