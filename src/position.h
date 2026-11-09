@@ -272,7 +272,7 @@ class Position {
     // chased() returns a ChaseMap (victim, attacker) pair set so that the
     // perpetual-chase accumulation can correctly verify the SAME attacker keeps
     // chasing the SAME victim across the repetition cycle. This is the core of
-    // the "常捉无根子" detector shared by AsianRule, SkyRule and YitianRule.
+    // the "常捉无根子" detector shared by AsianRule, SkyRule and YiTianRule.
     ChaseMap chased(Color c);
     bool  has_mate_threat(Depth d = -1);
     Value major_material(Color c) const;

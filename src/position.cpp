@@ -50,7 +50,7 @@ using namespace Attacks;
 
 namespace RuleConfig {
 // Defaults: SkyRule with rule120, Sixty Move Rule on.
-// AsianRule/SkyRule/ChineseRule/YitianRule all couple to rule120 and keep the
+// AsianRule/SkyRule/ChineseRule/YiTianRule all couple to rule120 and keep the
 // Sixty Move Rule on (enforced in engine.cpp couplings).
 RepetitionRule repetitionRule  = RepetitionRule::SKY;
 DrawRule       drawRule        = DrawRule::NONE;
@@ -1329,7 +1329,7 @@ SkyChaseMap Position::sky_chased(Color c) {
 // Returns a ChaseMap that encodes (victim, attacker) id pairs, so that the
 // perpetual-chase accumulation in detect_chases can correctly verify that the
 // SAME attacker keeps chasing the SAME victim across the repetition cycle.
-// This is the shared "常捉无根子" detector used by AsianRule, ChineseRule, YitianRule and
+// This is the shared "常捉无根子" detector used by AsianRule, ChineseRule, YiTianRule and
 // QiZheRule (SkyRule has its own sky_chased() with the same 天天象棋 definition);
 // each rule still applies its own scoring on top of the resulting victim mask.
 ChaseMap Position::chased(Color c) {
@@ -1371,7 +1371,7 @@ ChaseMap Position::chased(Color c) {
 
         // Rooks chased regardless of protection.
         // ChineseRule / QiZheRule（天天象棋棋规【三】1）：除车、兵外其他子捉车，无论车是否有根，算捉。
-        // AsianRule（亚象联棋例总纲 6、细则 15/20/21/37）/ YitianRule（弈天规则 14）：
+        // AsianRule（亚象联棋例总纲 6、细则 15/20/21/37）/ YiTianRule（弈天规则 14）：
         // 只有马或炮捉有根车仍算捉；士、象捉有真根之车属“长捉真根子作和”。
         // （车捉车走同类子路径；帅兵不在 attackers 之内。）
         Bitboard candidates =
@@ -1829,7 +1829,7 @@ Value Position::detect_chases(int d, int ply) {
     ChaseMap newChase[COLOR_NB];                  // ChaseMap (victim, attacker) per side
     newChase[us] = chased(us);
 
-    // AsianRule / YitianRule: 一将一捉 (check/chase alternation) is an allowed
+    // AsianRule / YiTianRule: 一将一捉 (check/chase alternation) is an allowed
     // sequence, so a check simply ends that side's perpetual chase (chase mask
     // cleared) and the side counts as allowed; the usual scoring below then gives
     // a draw against an idle or alternating opponent and a loss for a perpetual
@@ -1896,7 +1896,7 @@ Value Position::detect_chases(int d, int ply) {
             }
             else
             {
-                // AsianRule / YitianRule: a chase pair must also be created by this move
+                // AsianRule / YiTianRule: a chase pair must also be created by this move
                 // (absent before it), not only end on the opponent's reply.
                 // 弈天规则 13：走子前不存在“捉”的状态，而走子后才造成“捉”的状态；
                 // 亚象联“长捉”：甲方连走捉着而乙方被捉之子每着逃避。
@@ -2066,7 +2066,7 @@ bool Position::rule_judge(Value& result, int ply) {
         return true;
     }
 
-    // YitianRule 27：总步数（双方着法总数）达到 400 步判和；33：若一方被绝杀或困毙则不判和。
+    // YiTianRule 27：总步数（双方着法总数）达到 400 步判和；33：若一方被绝杀或困毙则不判和。
     // QiZheRule：棋局到 400 步自动判和；SkyRule（4）：总步数达到 400 步（200 回合）
     // 自动判和，若一方最后一步绝杀或困毙局面，不判和。
     if (gamePly >= 400

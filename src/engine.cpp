@@ -154,7 +154,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
 
     options.add(  //
       "Repetition Rule",
-      Option("SkyRule var SkyRule var AsianRule var YitianRule var ChineseRule var QiZheRule var ComputerRule",
+      Option("SkyRule var SkyRule var AsianRule var QiZheRule var YiTianRule var ChineseRule var ComputerRule",
              "SkyRule", [this](const Option& o) {
                  using RR = RuleConfig::RepetitionRule;
 
@@ -162,7 +162,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
                    o == "ChineseRule"  ? RR::CHINESE
                    : o == "SkyRule"    ? RR::SKY
                    : o == "ComputerRule" ? RR::COMPUTER
-                   : o == "YitianRule" ? RR::YITIAN
+                   : o == "YiTianRule" ? RR::YITIAN
                    : o == "QiZheRule"  ? RR::QIZHE
                    : o == "AllowChase" ? RR::ALLOW_CHASE
                    : o == "NoJudgement" ? RR::NO_JUDGEMENT
@@ -171,7 +171,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
                  // QiZheRule：自然著限判断中双方将军最多只计算 20 回合。
                  RuleConfig::checkCap = RuleConfig::repetitionRule == RR::QIZHE ? 20 : 10;
 
-                 // Couplings for AsianRule, SkyRule, ChineseRule and YitianRule:
+                 // Couplings for AsianRule, SkyRule, ChineseRule and YiTianRule:
                  // all four rules use rule120 (弈天规则 26：无吃子着数达到 120 步判和；
                  // 亚象联第四节：双方共走 120 步未有去子作和), Rule60MaxPly stays freely
                  // adjustable 90-150, and the
@@ -224,8 +224,8 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     options.add(  //
       "Sixty Move Rule", Option(true, [](const Option& o) {
           // The natural-move draw defaults on for every rule (including
-          // YitianRule) and can be freely toggled by the GUI; selecting
-          // AsianRule/SkyRule/YitianRule always switches it back on via the
+          // YiTianRule) and can be freely toggled by the GUI; selecting
+          // AsianRule/SkyRule/YiTianRule always switches it back on via the
           // Repetition Rule coupling.
           RuleConfig::sixtyMoveRule = int(o) != 0;
           RuleConfig::refresh_rule60();
