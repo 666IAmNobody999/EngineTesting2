@@ -83,6 +83,9 @@ class Engine {
     void set_tt_size(usize mb);
     void set_ponderhit(bool);
     void search_clear();
+    // ucinewgame: search_clear() and forget the time control / pondering of
+    // the previous game (automatic Search Algorithm).
+    void new_game();
     // Windows: CPU priority "Idle" for other Pikafish processes.
     void idle_other_pikafish() const;
 
@@ -120,6 +123,8 @@ class Engine {
 
    private:
     void avoid_sixty_move_draw(Search::LimitsType& limits);
+    void choose_search_algorithm(Search::LimitsType& limits);
+    void new_game_state();
     const std::filesystem::path binaryDirectory;
 
     NumaReplicationContext numaContext;
@@ -136,6 +141,11 @@ class Engine {
     Search::SearchManager::UpdateContext  updateContext;
     std::function<void(std::string_view)> onVerifyNetwork;
     std::map<NumaIndex, SharedHistories>  sharedHists;
+
+    // Automatic Search Algorithm: what is known about the current game.
+    TimePoint gameBaseTime = 0;      // largest remaining time seen (base time)
+    bool      gamePonder   = false;  // a go ponder was received in this game
+    int       gameLastPly  = -1;
 };
 
 }  // namespace Stockfish

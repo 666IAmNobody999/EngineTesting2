@@ -179,7 +179,7 @@ void UCIEngine::loop() {
             }
         }
         else if (token == "ucinewgame" || token == "uccinewgame")
-            engine.search_clear();
+            engine.new_game();
         else if (token == "isready")
         {
             engine.idle_other_pikafish();
@@ -630,7 +630,7 @@ void UCIEngine::setoption_ucci(const std::string& rawName, const std::string& ra
     }
     if (lname == "newgame")
     {
-        engine.search_clear();
+        engine.new_game();
         return;
     }
 

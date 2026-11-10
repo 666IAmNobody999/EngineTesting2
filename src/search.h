@@ -316,6 +316,8 @@ struct LimitsType {
         movestogo = depth = mate = perft = infinite = 0;
         nodes                                       = 0;
         ponderMode = forceImproved = false;
+        algo                       = SearchAlgorithm::IMPROVED_MULTIPV3;
+        algoReason                 = nullptr;
     }
 
     bool use_time_management() const { return time[WHITE] || time[BLACK]; }
@@ -326,6 +328,8 @@ struct LimitsType {
     u64                      nodes;
     bool                     ponderMode;
     bool                     forceImproved;  // bench: no info string Search Algorithm
+    SearchAlgorithm          algo;           // chosen by Engine::go()
+    const char*              algoReason;     // why (info string), nullptr in bench
 };
 
 

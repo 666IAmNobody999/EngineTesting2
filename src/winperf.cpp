@@ -103,9 +103,11 @@ using NtSetInformationProcessFn = LONG(WINAPI*)(HANDLE, ULONG, PVOID, ULONG);
 using SetProcessInformationFn   = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
 
 constexpr ULONG ProcessIoPriority     = 33;  // PROCESSINFOCLASS::ProcessIoPriority
+constexpr ULONG IoPriorityVeryLow     = 0;
 constexpr ULONG IoPriorityNormal      = 2;
 constexpr ULONG IoPriorityHigh        = 3;
 constexpr int   ProcessMemoryPriority = 0;  // PROCESS_INFORMATION_CLASS::ProcessMemoryPriority
+constexpr ULONG MemoryPriorityVeryLow = 1;  // MEMORY_PRIORITY_VERY_LOW
 constexpr ULONG MemoryPriorityNormal  = 5;  // MEMORY_PRIORITY_NORMAL
 
 bool enable_privilege(const wchar_t* name) {
@@ -638,12 +640,26 @@ bool same_user(const std::vector<BYTE>& a, const std::vector<BYTE>& b) {
 
 }  // namespace
 
+// Executable names (lower case, substring match) of the engines put to "Idle".
+constexpr const wchar_t* IdleNames[] = {L"pikafish", L"pika", L"fish", L"cyclone", L"bugchess"};
+
+static bool idle_name(const std::wstring& exe) {
+    const std::wstring name = lower(exe);
+    for (const wchar_t* n : IdleNames)
+        if (name.find(n) != std::wstring::npos)
+            return true;
+    return false;
+}
+
 void idle_other_pikafish() {
     const DWORD             selfPid  = GetCurrentProcessId();
     const std::wstring      selfPath = image_path(GetCurrentProcess());
     const std::vector<BYTE> selfUser = token_user(GetCurrentProcess());
     if (selfPath.empty() || selfUser.empty())
         return;
+
+    static auto ntSet   = load<NtSetInformationProcessFn>(L"ntdll.dll", "NtSetInformationProcess");
+    static auto setInfo = load<SetProcessInformationFn>(L"kernel32.dll", "SetProcessInformation");
 
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE)
@@ -653,7 +669,7 @@ void idle_other_pikafish() {
     e.dwSize = sizeof(e);
     for (BOOL ok = Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e))
     {
-        if (e.th32ProcessID == selfPid || lower(e.szExeFile).find(L"pikafish") == std::wstring::npos)
+        if (e.th32ProcessID == selfPid || !idle_name(e.szExeFile))
             continue;
 
         HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION, FALSE,
@@ -663,9 +679,22 @@ void idle_other_pikafish() {
 
         // Same user only; copies of this very executable (other instances of
         // this engine and its own watchers) are left alone.
-        if (same_user(token_user(h), selfUser) && image_path(h) != selfPath
-            && GetPriorityClass(h) != IDLE_PRIORITY_CLASS)
-            SetPriorityClass(h, IDLE_PRIORITY_CLASS);
+        if (same_user(token_user(h), selfUser) && image_path(h) != selfPath)
+        {
+            // CPU priority "Idle", I/O priority and memory priority "Very low".
+            if (GetPriorityClass(h) != IDLE_PRIORITY_CLASS)
+                SetPriorityClass(h, IDLE_PRIORITY_CLASS);
+            if (ntSet)
+            {
+                ULONG io = IoPriorityVeryLow;
+                ntSet(h, ProcessIoPriority, &io, sizeof(io));
+            }
+            if (setInfo)
+            {
+                ULONG mem = MemoryPriorityVeryLow;  // MEMORY_PRIORITY_INFORMATION
+                setInfo(h, ProcessMemoryPriority, &mem, sizeof(mem));
+            }
+        }
         CloseHandle(h);
     }
     CloseHandle(snap);

@@ -35,8 +35,10 @@
 //    with --pikafish-power-watch <pid>) restores the plan even if the GUI kills the
 //    engine instead of sending "quit".
 //  * idle_other_pikafish(): sets every other process of the same user whose
-//    executable name contains "pikafish" (case-insensitive) and that is not
-//    this engine's own executable to CPU priority "Idle".
+//    executable name contains "pikafish", "pika", "fish", "cyclone" or
+//    "bugchess" (case-insensitive) and that is not this engine's own
+//    executable to CPU priority "Idle", I/O priority and memory priority
+//    "Very low".
 //  * plan_physical_core_pins(n): when n search threads fit on the physical
 //    cores, one logical processor (global index group * 64 + bit) per thread,
 //    each on a different physical core: performance cores first (hybrid CPUs),

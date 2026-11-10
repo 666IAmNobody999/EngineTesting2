@@ -327,8 +327,69 @@ void Engine::go(Search::LimitsType& limits) {
         return;
     }
 
+    choose_search_algorithm(limits);
     avoid_sixty_move_draw(limits);
     threads.start_thinking(pos, states, limits);
+}
+
+// Search Algorithm, chosen automatically for every go (the option only matters
+// for bench):
+//  1. analysis (go infinite, or no limit at all)              -> ImprovedMultiPV3
+//  2. sudden death of at most 5 minutes with at most 1 s increment
+//     (also when pondering)                                    -> ImprovedMultiPV2
+//  3. pondering on (Ponder option, go ponder in this game)     -> ImprovedMultiPV3
+//  4. pondering off                                            -> ImprovedMultiPV2
+// The base time of the game is the largest remaining time seen since the last
+// ucinewgame (or since the game ply went backwards, i.e. a new game).
+void Engine::choose_search_algorithm(Search::LimitsType& limits) {
+    using Search::SearchAlgorithm;
+
+    if (limits.forceImproved)  // bench: keep the option, the signature stays fixed
+    {
+        limits.algo       = Search::Improved::parse(options);
+        limits.algoReason = nullptr;
+        return;
+    }
+
+    const int ply = pos.game_ply();
+    if (ply < gameLastPly)
+        new_game_state();
+    gameLastPly = ply;
+
+    const Color us = pos.side_to_move();
+    gameBaseTime   = std::max(gameBaseTime, limits.time[us]);
+    gamePonder     = gamePonder || limits.ponderMode;
+
+    constexpr TimePoint BlitzMaxBase = 5 * 60 * 1000;
+    constexpr TimePoint BlitzMaxInc  = 1000;
+
+    const bool analysis = limits.infinite
+                       || (!limits.use_time_management() && !limits.movetime && !limits.depth
+                           && !limits.nodes && !limits.mate);
+    const bool blitz = limits.use_time_management() && limits.time[us] > 0 && !limits.movestogo
+                    && limits.inc[us] <= BlitzMaxInc
+                    && gameBaseTime <= BlitzMaxBase + limits.inc[us];
+    const bool ponder = bool(options["Ponder"]) || limits.ponderMode || gamePonder;
+
+    if (analysis)
+        limits.algo = SearchAlgorithm::IMPROVED_MULTIPV3, limits.algoReason = "Analysis";
+    else if (blitz)
+        limits.algo = SearchAlgorithm::IMPROVED_MULTIPV2, limits.algoReason = "Blitz";
+    else if (ponder)
+        limits.algo = SearchAlgorithm::IMPROVED_MULTIPV3, limits.algoReason = "Ponder on";
+    else
+        limits.algo = SearchAlgorithm::IMPROVED_MULTIPV2, limits.algoReason = "Ponder off";
+}
+
+void Engine::new_game_state() {
+    gameBaseTime = 0;
+    gamePonder   = false;
+    gameLastPly  = -1;
+}
+
+void Engine::new_game() {
+    new_game_state();
+    search_clear();
 }
 
 // Avoid_Sixty_Move_Draw (HumanLike / HumanLikeBareKing): with more material than
@@ -406,8 +467,10 @@ void Engine::avoid_sixty_move_draw(Search::LimitsType& limits) {
 
 void Engine::stop() { threads.stop = true; }
 
-// Windows: other processes whose name contains "pikafish" (same user, not this
-// executable) get CPU priority "Idle"; called at start-up, isready and ucinewgame.
+// Windows: other processes whose name contains "pikafish", "pika", "fish",
+// "cyclone" or "bugchess" (same user, not this executable) get CPU priority
+// "Idle" and I/O / memory priority "Very low"; called at start-up, isready and
+// ucinewgame.
 void Engine::idle_other_pikafish() const { WinPerf::idle_other_pikafish(); }
 
 void Engine::search_clear() {
