@@ -337,11 +337,10 @@ bool Search::Worker::iterative_deepening() {
     const usize altLines = !altLine ? 0
                          : std::min(algo == SearchAlgorithm::IMPROVED_MULTIPV3 ? usize(3) : usize(2),
                                     rootMoves.size());
-    // Depth cap of the extra lines, and whether they rotate over the root moves
-    // beyond it (Improved MultiPV 3 only).
+    // Depth cap of the extra lines; beyond it they rotate over the root moves.
     const Depth altCap    = algo == SearchAlgorithm::IMPROVED_MULTIPV3 ? Improved::AltMaxDepthV3
                                                                        : Improved::AltMaxDepthV2;
-    const bool  altRotate = algo == SearchAlgorithm::IMPROVED_MULTIPV3;
+    const bool  altRotate = true;
 
     // Tell the GUI which search is actually used for this go (not in bench).
     if (is_mainthread() && !limits.forceImproved)
