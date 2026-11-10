@@ -437,11 +437,15 @@ bool Search::Worker::iterative_deepening() {
                 // Beyond the cap the extra lines take turns over the 2nd, 3rd, 4th
                 // ... root moves (one move per line and iteration), so that moves
                 // the main line has ranked low are re-examined with a full window.
+                // Once every root move has had its turn the extra lines pause and
+                // the main line gets all the time (a second round at the same
+                // capped depth would mostly repeat transposition table results).
                 if (altRotate && rootDepth > altCap && rootMoves.size() > lines)
                 {
-                    pvIdx = 1
-                          + (usize(rootDepth - altCap) * (lines - 1) + lineNo - 1)
-                              % (rootMoves.size() - 1);
+                    const usize turn = usize(rootDepth - altCap) * (lines - 1) + lineNo - 1;
+                    if (turn >= rootMoves.size() - 1)
+                        continue;
+                    pvIdx  = 1 + turn;
                     pvLast = pvIdx + 1;
                 }
             }

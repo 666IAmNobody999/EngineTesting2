@@ -197,7 +197,8 @@ enum class AttackMode {
 //                 cap the 2nd and 3rd best moves are examined with a full window
 //                 instead of a reduced null window; beyond the cap the two lines
 //                 take turns over the 2nd, 3rd, 4th, 5th ... root moves, one move
-//                 each per iteration, at the capped depth.
+//                 each per iteration, at the capped depth, and pause once every
+//                 root move has had its turn.
 //   IMPROVED_MULTIPV2 : one extra line as in MultiPV 2, its depth capped at
 //                 AltMaxDepthV2; beyond the cap it only re-verifies its own move
 //                 (the best alternative found up to the cap) at the capped depth.
