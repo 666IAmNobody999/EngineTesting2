@@ -190,9 +190,10 @@ enum class AttackMode {
     FORCED_DRAW
 };
 
-// Search Algorithm option (used when MultiPV is 1 and no Skill / Attack mode
-// needs more lines; otherwise the plain search, "Original", is used).
-//   IMPROVED_MULTIPV3 (default): the main thread searches two extra root lines
+// Search Algorithm, chosen automatically by Engine::go() (no UCI option). Used
+// when MultiPV is 1 and no Skill / Attack mode needs more lines; otherwise the
+// plain search, "Original", is used.
+//   IMPROVED_MULTIPV3: the main thread searches two extra root lines
 //                 as in MultiPV 3, their depth capped at AltMaxDepthV3. Up to the
 //                 cap the 2nd and 3rd best moves are examined with a full window
 //                 instead of a reduced null window; beyond the cap the two lines
@@ -223,8 +224,6 @@ constexpr Depth AltRecheckEvery = 4;   // ... but re-checked at least every N pl
 constexpr int   AltMaxAdvantageCp = 24000;  // no second line once the main line is this far ahead
 
 constexpr usize MaxLines       = 3;    // main line + up to two extra lines
-
-SearchAlgorithm parse(const OptionsMap& options);
 }
 
 namespace Attack {

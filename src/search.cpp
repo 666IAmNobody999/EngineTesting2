@@ -2250,11 +2250,6 @@ Value Search::Worker::evaluate(const Position& pos) {
 }
 
 
-SearchAlgorithm Search::Improved::parse(const OptionsMap& options) {
-    return options["Search Algorithm"] == "ImprovedMultiPV2" ? SearchAlgorithm::IMPROVED_MULTIPV2
-                                                             : SearchAlgorithm::IMPROVED_MULTIPV3;
-}
-
 AttackMode Search::Attack::parse(const OptionsMap& options) {
     const Option& o = options["Attack Mode"];
     return o == "BareKing"          ? AttackMode::BARE_KING

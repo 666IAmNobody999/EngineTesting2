@@ -125,15 +125,8 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     options.add(  //
       "MultiPV", Option(1, 1, MAX_MOVES));
 
-    // Search Algorithm: ImprovedMultiPV3 (default) / ImprovedMultiPV2
-    // (Search::Improved::parse).
-    options.add(  //
-      "Search Algorithm",
-      Option("ImprovedMultiPV3 var ImprovedMultiPV3 var ImprovedMultiPV2", "ImprovedMultiPV3",
-             [this](const Option&) {
-                 search_clear();
-                 return std::nullopt;
-             }));
+    // Search Algorithm: no UCI option, chosen for every go by
+    // Engine::choose_search_algorithm().
 
     // Attack Mode: Best Move (normal) / Bare King / Forced Draw. The shaped values
     // of Bare King live in the transposition table, so switching modes clears it.
@@ -332,11 +325,11 @@ void Engine::go(Search::LimitsType& limits) {
     threads.start_thinking(pos, states, limits);
 }
 
-// Search Algorithm, chosen automatically for every go (the option only matters
-// for bench):
+// Search Algorithm (no UCI option), chosen automatically for every go:
 //  1. analysis (go infinite, or no limit at all)              -> ImprovedMultiPV3
-//  2. sudden death of at most 5 minutes with at most 1 s increment
-//     (also when pondering)                                    -> ImprovedMultiPV2
+//  2. sudden death of at most 5 minutes with at most 1 s increment, or at most
+//     1 s per move (go movetime, or movestogo 1), also when pondering
+//                                                              -> ImprovedMultiPV2
 //  3. pondering on (Ponder option, go ponder in this game)     -> ImprovedMultiPV3
 //  4. pondering off                                            -> ImprovedMultiPV2
 // The base time of the game is the largest remaining time seen since the last
@@ -344,9 +337,9 @@ void Engine::go(Search::LimitsType& limits) {
 void Engine::choose_search_algorithm(Search::LimitsType& limits) {
     using Search::SearchAlgorithm;
 
-    if (limits.forceImproved)  // bench: keep the option, the signature stays fixed
+    if (limits.forceImproved)  // bench: always ImprovedMultiPV3, the signature stays fixed
     {
-        limits.algo       = Search::Improved::parse(options);
+        limits.algo       = SearchAlgorithm::IMPROVED_MULTIPV3;
         limits.algoReason = nullptr;
         return;
     }
@@ -362,6 +355,7 @@ void Engine::choose_search_algorithm(Search::LimitsType& limits) {
 
     constexpr TimePoint BlitzMaxBase = 5 * 60 * 1000;
     constexpr TimePoint BlitzMaxInc  = 1000;
+    constexpr TimePoint FastMoveTime = 1000;
 
     const bool analysis = limits.infinite
                        || (!limits.use_time_management() && !limits.movetime && !limits.depth
@@ -369,12 +363,17 @@ void Engine::choose_search_algorithm(Search::LimitsType& limits) {
     const bool blitz = limits.use_time_management() && limits.time[us] > 0 && !limits.movestogo
                     && limits.inc[us] <= BlitzMaxInc
                     && gameBaseTime <= BlitzMaxBase + limits.inc[us];
+    const bool fastMove = (limits.movetime > 0 && limits.movetime <= FastMoveTime)
+                       || (limits.movestogo == 1 && limits.time[us] > 0
+                           && limits.time[us] <= FastMoveTime + limits.inc[us]);
     const bool ponder = bool(options["Ponder"]) || limits.ponderMode || gamePonder;
 
     if (analysis)
         limits.algo = SearchAlgorithm::IMPROVED_MULTIPV3, limits.algoReason = "Analysis";
     else if (blitz)
         limits.algo = SearchAlgorithm::IMPROVED_MULTIPV2, limits.algoReason = "Blitz";
+    else if (fastMove)
+        limits.algo = SearchAlgorithm::IMPROVED_MULTIPV2, limits.algoReason = "1s per move";
     else if (ponder)
         limits.algo = SearchAlgorithm::IMPROVED_MULTIPV3, limits.algoReason = "Ponder on";
     else
