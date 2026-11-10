@@ -217,7 +217,7 @@ struct LimitsType;
 
 namespace Improved {
 constexpr Depth AltMaxDepthV3  = 20;   // depth cap of the extra lines (Improved MultiPV 3)
-constexpr Depth AltMaxDepthV2  = 15;   // depth cap of the extra line (Improved MultiPV 2)
+constexpr Depth AltMaxDepthV2  = 20;   // depth cap of the extra line (Improved MultiPV 2)
 constexpr int   AltWindowCp    = 150;  // second line skipped when this far behind (cp)
 constexpr Depth AltRecheckEvery = 4;   // ... but re-checked at least every N plies
 constexpr int   AltMaxAdvantageCp = 24000;  // no second line once the main line is this far ahead
