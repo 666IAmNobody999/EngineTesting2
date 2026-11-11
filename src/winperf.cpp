@@ -51,6 +51,8 @@ void acquire_power_plan() {}
 void release_power_plan() {}
 bool run_power_watcher(int, char*[]) { return false; }
 void idle_other_pikafish() {}
+void ensure_lock_pages_right() {}
+bool run_lock_pages_helper(int, char*[]) { return false; }
 std::vector<int> plan_physical_core_pins(std::size_t) { return {}; }
 bool             pin_current_thread(int) { return false; }
 
@@ -65,6 +67,7 @@ bool             pin_current_thread(int) { return false; }
         #define WIN32_LEAN_AND_MEAN
     #endif
     #include <windows.h>
+    #include <shellapi.h>
     #include <tlhelp32.h>
 
     #include <atomic>
@@ -73,7 +76,9 @@ bool             pin_current_thread(int) { return false; }
     #include <cstdlib>
     #include <cstring>
     #include <fstream>
+    #include <iostream>
     #include <string>
+    #include <thread>
     #include <vector>
 
 namespace Stockfish::WinPerf {
@@ -109,6 +114,18 @@ constexpr ULONG IoPriorityHigh        = 3;
 constexpr int   ProcessMemoryPriority = 0;  // PROCESS_INFORMATION_CLASS::ProcessMemoryPriority
 constexpr ULONG MemoryPriorityVeryLow = 1;  // MEMORY_PRIORITY_VERY_LOW
 constexpr ULONG MemoryPriorityNormal  = 5;  // MEMORY_PRIORITY_NORMAL
+
+// PROCESS_INFORMATION_CLASS::ProcessPowerThrottling and its
+// PROCESS_POWER_THROTTLING_STATE (Windows 10 1709 and later; EcoQoS on Windows 11).
+constexpr int   ProcessPowerThrottling          = 4;
+constexpr ULONG PowerThrottlingVersion          = 1;
+constexpr ULONG PowerThrottlingExecutionSpeed   = 0x1;
+constexpr ULONG PowerThrottlingIgnoreTimerRes   = 0x4;
+struct PowerThrottlingState {
+    ULONG Version;
+    ULONG ControlMask;
+    ULONG StateMask;
+};
 
 bool enable_privilege(const wchar_t* name) {
     HANDLE token = nullptr;
@@ -529,6 +546,13 @@ void apply_process_tuning() {
     {
         ULONG mem = MemoryPriorityNormal;  // MEMORY_PRIORITY_INFORMATION
         setInfo(proc, ProcessMemoryPriority, &mem, sizeof(mem));
+
+        // 5. Out of EcoQoS / power throttling: full clock speed and the
+        //    performance cores even when the GUI window is in the background,
+        //    and timer resolution requests honoured.
+        PowerThrottlingState pt{PowerThrottlingVersion,
+                                PowerThrottlingExecutionSpeed | PowerThrottlingIgnoreTimerRes, 0};
+        setInfo(proc, ProcessPowerThrottling, &pt, sizeof(pt));
     }
 }
 
@@ -681,9 +705,13 @@ void idle_other_pikafish() {
         // this engine and its own watchers) are left alone.
         if (same_user(token_user(h), selfUser) && image_path(h) != selfPath)
         {
-            // CPU priority "Idle", I/O priority and memory priority "Very low".
+            // CPU priority "Idle", I/O priority and memory priority "Very low",
+            // EcoQoS (power throttling on) and no dynamic priority boost.
             if (GetPriorityClass(h) != IDLE_PRIORITY_CLASS)
                 SetPriorityClass(h, IDLE_PRIORITY_CLASS);
+            BOOL boostDisabled = FALSE;
+            if (GetProcessPriorityBoost(h, &boostDisabled) && !boostDisabled)
+                SetProcessPriorityBoost(h, TRUE);
             if (ntSet)
             {
                 ULONG io = IoPriorityVeryLow;
@@ -693,6 +721,9 @@ void idle_other_pikafish() {
             {
                 ULONG mem = MemoryPriorityVeryLow;  // MEMORY_PRIORITY_INFORMATION
                 setInfo(h, ProcessMemoryPriority, &mem, sizeof(mem));
+                PowerThrottlingState pt{PowerThrottlingVersion, PowerThrottlingExecutionSpeed,
+                                        PowerThrottlingExecutionSpeed};
+                setInfo(h, ProcessPowerThrottling, &pt, sizeof(pt));
             }
         }
         CloseHandle(h);
@@ -760,6 +791,249 @@ bool pin_current_thread(int cpu) {
     ga.Group = WORD(cpu / 64);
     ga.Mask  = KAFFINITY(1) << (cpu % 64);
     return SetThreadGroupAffinity(GetCurrentThread(), &ga, nullptr) != 0;
+}
+
+
+// ---------------------------------------------------------------------------
+// Large Pages: account right "Lock pages in memory" (SeLockMemoryPrivilege)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr const char*    LockPagesSwitch = "--huanshen-grant-lock-pages";
+constexpr const wchar_t* LockPagesRight  = L"SeLockMemoryPrivilege";
+constexpr ACCESS_MASK    PolicyLookupNames  = 0x00000800;  // POLICY_LOOKUP_NAMES
+constexpr ACCESS_MASK    PolicyCreateAccount = 0x00000010;  // POLICY_CREATE_ACCOUNT
+constexpr LONG           StatusObjectNameNotFound = LONG(0xC0000034);
+
+// LSA_UNICODE_STRING / LSA_OBJECT_ATTRIBUTES (ntsecapi.h)
+struct LsaString {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR  Buffer;
+};
+struct LsaObjectAttributes {
+    ULONG      Length;
+    HANDLE     RootDirectory;
+    LsaString* ObjectName;
+    ULONG      Attributes;
+    PVOID      SecurityDescriptor;
+    PVOID      SecurityQualityOfService;
+};
+
+using LsaOpenPolicyFn = LONG(WINAPI*)(LsaString*, LsaObjectAttributes*, ACCESS_MASK, HANDLE*);
+using LsaAddAccountRightsFn       = LONG(WINAPI*)(HANDLE, PSID, LsaString*, ULONG);
+using LsaEnumerateAccountRightsFn = LONG(WINAPI*)(HANDLE, PSID, LsaString**, ULONG*);
+using LsaFreeMemoryFn             = LONG(WINAPI*)(PVOID);
+using LsaCloseFn                  = LONG(WINAPI*)(HANDLE);
+using ConvertSidToStringSidWFn    = BOOL(WINAPI*)(PSID, LPWSTR*);
+using ConvertStringSidToSidWFn    = BOOL(WINAPI*)(LPCWSTR, PSID*);
+using ShellExecuteExWFn           = BOOL(WINAPI*)(SHELLEXECUTEINFOW*);
+using CoInitializeExFn            = HRESULT(WINAPI*)(LPVOID, DWORD);
+
+struct Lsa {
+    LsaOpenPolicyFn open = load<LsaOpenPolicyFn>(L"advapi32.dll", "LsaOpenPolicy");
+    LsaAddAccountRightsFn add = load<LsaAddAccountRightsFn>(L"advapi32.dll", "LsaAddAccountRights");
+    LsaEnumerateAccountRightsFn enumerate =
+      load<LsaEnumerateAccountRightsFn>(L"advapi32.dll", "LsaEnumerateAccountRights");
+    LsaFreeMemoryFn free  = load<LsaFreeMemoryFn>(L"advapi32.dll", "LsaFreeMemory");
+    LsaCloseFn      close = load<LsaCloseFn>(L"advapi32.dll", "LsaClose");
+    ConvertSidToStringSidWFn sidToString =
+      load<ConvertSidToStringSidWFn>(L"advapi32.dll", "ConvertSidToStringSidW");
+    ConvertStringSidToSidWFn stringToSid =
+      load<ConvertStringSidToSidWFn>(L"advapi32.dll", "ConvertStringSidToSidW");
+
+    bool ok() const { return open && add && enumerate && free && close && sidToString && stringToSid; }
+};
+
+Lsa& lsa() {
+    static Lsa l;
+    return l;
+}
+
+LsaString lock_right_name() {
+    LsaString s;
+    s.Buffer        = const_cast<PWSTR>(LockPagesRight);
+    s.Length        = USHORT(std::wcslen(LockPagesRight) * sizeof(wchar_t));
+    s.MaximumLength = USHORT(s.Length + sizeof(wchar_t));
+    return s;
+}
+
+HANDLE open_policy(ACCESS_MASK access) {
+    LsaObjectAttributes attr{};
+    attr.Length   = sizeof(attr);
+    HANDLE policy = nullptr;
+    return lsa().open(nullptr, &attr, access, &policy) >= 0 ? policy : nullptr;
+}
+
+// 1: the account has the right, 0: it has not, -1: unknown.
+int account_has_lock_right(PSID sid) {
+    HANDLE policy = open_policy(PolicyLookupNames);
+    if (!policy)
+        return -1;
+
+    LsaString* rights = nullptr;
+    ULONG      count  = 0;
+    const LONG st     = lsa().enumerate(policy, sid, &rights, &count);
+    int        result = st == StatusObjectNameNotFound ? 0 : -1;
+    if (st >= 0)
+    {
+        const LsaString want = lock_right_name();
+        result               = 0;
+        for (ULONG i = 0; i < count; ++i)
+            if (rights[i].Length == want.Length
+                && !std::wcsncmp(rights[i].Buffer, want.Buffer, want.Length / sizeof(wchar_t)))
+                result = 1;
+        lsa().free(rights);
+    }
+    lsa().close(policy);
+    return result;
+}
+
+bool grant_lock_right(PSID sid) {
+    HANDLE policy = open_policy(PolicyLookupNames | PolicyCreateAccount);
+    if (!policy)
+        return false;
+    LsaString  right = lock_right_name();
+    const bool ok    = lsa().add(policy, sid, &right, 1) >= 0;
+    lsa().close(policy);
+    return ok;
+}
+
+bool token_has_lock_privilege() {
+    LUID luid{};
+    if (!LookupPrivilegeValueW(nullptr, LockPagesRight, &luid))
+        return false;
+
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+    DWORD size = 0;
+    GetTokenInformation(token, TokenPrivileges, nullptr, 0, &size);
+    std::vector<BYTE> buf(size);
+    bool              found = false;
+    if (size && GetTokenInformation(token, TokenPrivileges, buf.data(), size, &size))
+    {
+        const auto* tp = reinterpret_cast<const TOKEN_PRIVILEGES*>(buf.data());
+        for (DWORD i = 0; i < tp->PrivilegeCount; ++i)
+            if (tp->Privileges[i].Luid.LowPart == luid.LowPart
+                && tp->Privileges[i].Luid.HighPart == luid.HighPart)
+                found = true;
+    }
+    CloseHandle(token);
+    return found;
+}
+
+bool process_elevated() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+    TOKEN_ELEVATION e{};
+    DWORD           size = 0;
+    const bool      ok =
+      GetTokenInformation(token, TokenElevation, &e, sizeof(e), &size) && e.TokenIsElevated;
+    CloseHandle(token);
+    return ok;
+}
+
+void lock_pages_info(const char* msg) {
+    std::cout << "info string Large Pages: " << msg << std::endl;
+}
+
+// Starts this executable elevated (UAC) as the helper that grants the right to
+// the given account. Runs on its own thread: the prompt never blocks the engine.
+void request_elevated_grant(const std::wstring& sidString) {
+    std::vector<wchar_t> exe(32768);
+    DWORD                n = GetModuleFileNameW(nullptr, exe.data(), DWORD(exe.size()));
+    if (n == 0 || n >= exe.size())
+        return;
+
+    std::wstring path(exe.data(), n), params;
+    for (const char* c = LockPagesSwitch; *c; ++c)
+        params += wchar_t(*c);
+    params += L" " + sidString;
+
+    std::thread([path, params]() {
+        static auto shellExecute = load<ShellExecuteExWFn>(L"shell32.dll", "ShellExecuteExW");
+        static auto coInit       = load<CoInitializeExFn>(L"ole32.dll", "CoInitializeEx");
+        if (!shellExecute)
+            return;
+        if (coInit)
+            coInit(nullptr, 0x2 | 0x4);  // COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE
+
+        SHELLEXECUTEINFOW sei{};
+        sei.cbSize       = sizeof(sei);
+        sei.fMask        = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+        sei.lpVerb       = L"runas";
+        sei.lpFile       = path.c_str();
+        sei.lpParameters = params.c_str();
+        sei.nShow        = SW_HIDE;
+        shellExecute(&sei);
+    }).detach();
+}
+
+}  // namespace
+
+void ensure_lock_pages_right() {
+    if (!GetLargePageMinimum() || token_has_lock_privilege() || !lsa().ok())
+        return;  // no Large Pages on this system, or already usable
+
+    const std::vector<BYTE> user = token_user(GetCurrentProcess());
+    if (user.empty())
+        return;
+    PSID sid = reinterpret_cast<const TOKEN_USER*>(user.data())->User.Sid;
+
+    if (account_has_lock_right(sid) == 1)
+    {
+        lock_pages_info("\"Lock pages in memory\" is granted, sign out and in again to use it");
+        return;
+    }
+
+    if (process_elevated())
+    {
+        lock_pages_info(grant_lock_right(sid)
+                          ? "\"Lock pages in memory\" granted, sign out and in again to use it"
+                          : "could not grant \"Lock pages in memory\"");
+        return;
+    }
+
+    // Not elevated. A GUI talks to the engine through pipes: never show a UAC
+    // prompt there (it would take over the screen during a game). Only when the
+    // engine was started by hand (console input) is Windows asked for it.
+    DWORD mode = 0;
+    if (!GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode))
+    {
+        lock_pages_info("not available, start the engine once by double-clicking it "
+                        "to grant \"Lock pages in memory\"");
+        return;
+    }
+
+    LPWSTR sidString = nullptr;
+    if (!lsa().sidToString(sid, &sidString) || !sidString)
+        return;
+    request_elevated_grant(sidString);
+    LocalFree(sidString);
+    lock_pages_info("asking Windows (UAC) for \"Lock pages in memory\"; "
+                    "after accepting, sign out and in again");
+}
+
+bool run_lock_pages_helper(int argc, char* argv[]) {
+    if (argc < 3 || std::strcmp(argv[1], LockPagesSwitch) != 0)
+        return false;
+
+    if (lsa().ok())
+    {
+        std::wstring sidString;
+        for (const char* c = argv[2]; *c; ++c)
+            sidString += wchar_t(*c);
+        PSID sid = nullptr;
+        if (lsa().stringToSid(sidString.c_str(), &sid) && sid)
+        {
+            grant_lock_right(sid);
+            LocalFree(sid);
+        }
+    }
+    return true;
 }
 
 }  // namespace Stockfish::WinPerf

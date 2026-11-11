@@ -38,7 +38,7 @@
 //    executable name contains "pikafish", "pika", "fish", "cyclone" or
 //    "bugchess" (case-insensitive) and that is not this engine's own
 //    executable to CPU priority "Idle", I/O priority and memory priority
-//    "Very low".
+//    "Very low", EcoQoS (power throttling on) and no dynamic priority boost.
 //  * plan_physical_core_pins(n): when n search threads fit on the physical
 //    cores, one logical processor (global index group * 64 + bit) per thread,
 //    each on a different physical core: performance cores first (hybrid CPUs),
@@ -48,6 +48,15 @@
 //  * pin_current_thread(cpu): hard-binds the calling thread to that processor.
 //  * run_power_watcher(): returns true when this process is such a watcher;
 //    main() must then return immediately.
+//  * ensure_lock_pages_right(): Large Pages need the account right "Lock pages
+//    in memory" (SeLockMemoryPrivilege). When it is missing: an elevated engine
+//    grants it at once; an engine started by hand (console) asks Windows for
+//    elevation (UAC) in the background; an engine started by a GUI never shows
+//    a prompt and only prints a hint. Windows applies the right after the
+//    next sign-in.
+//  * run_lock_pages_helper(): returns true when this process is the elevated
+//    helper (--huanshen-grant-lock-pages <SID>) started for that; main() must
+//    then return immediately.
 
 namespace Stockfish::WinPerf {
 
@@ -56,6 +65,8 @@ void acquire_power_plan();
 void release_power_plan();
 bool run_power_watcher(int argc, char* argv[]);
 void idle_other_pikafish();
+void ensure_lock_pages_right();
+bool run_lock_pages_helper(int argc, char* argv[]);
 std::vector<int> plan_physical_core_pins(std::size_t threads);
 bool             pin_current_thread(int cpu);
 

@@ -44,6 +44,10 @@ int main(int argc, char* argv[]) {
     if (WinPerf::run_power_watcher(argc, argv))
         return 0;
 
+    // Windows: the elevated helper that grants "Lock pages in memory" (Large Pages).
+    if (WinPerf::run_lock_pages_helper(argc, argv))
+        return 0;
+
     // Switch Windows console to UTF-8 BEFORE printing any Chinese text to prevent garbled characters
     set_console_utf8();
 
@@ -64,6 +68,9 @@ int main(int argc, char* argv[]) {
 
     // Windows: "幻神终极效能" power plan while the engine runs.
     WinPerf::acquire_power_plan();
+
+    // Windows: make sure Large Pages can be used ("Lock pages in memory").
+    WinPerf::ensure_lock_pages_right();
 
     Attacks::init();
     Position::init();
