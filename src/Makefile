@@ -913,7 +913,9 @@ BUILD_SHA_FILE       := .build_sha.txt
 BUILD_DATE_FILE      := .build_date.txt
 BUILD_DIFFINDEX_FILE := .build_diffindex.txt
 GIT_SHA              := $(shell git rev-parse HEAD 2>/dev/null | cut -c 1-8 || true)
-GIT_DATE             := $(shell git show -s --date=format:%Y%m%d --format=%cd HEAD 2>/dev/null || true)
+# Engine name date = the day this build is made, Hong Kong time (UTC+8), so a
+# GitHub build shows the day it was produced (not the commit date).
+GIT_DATE             := $(shell date -u -d '+8 hours' +%Y%m%d 2>/dev/null || date -u -v+8H +%Y%m%d 2>/dev/null || true)
 GIT_DIFFINDEX        := $(shell git update-index --refresh >/dev/null 2>&1; git -c core.filemode=false -c core.autocrlf=false  diff-index --quiet HEAD -- 2>/dev/null; [ $$? -eq 1 ] && echo 1 || true)
 COMPILER_DATE        := $(shell date +%Y%m%d 2>/dev/null)
 
