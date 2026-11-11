@@ -39,6 +39,13 @@
 //    "bugchess" (case-insensitive) and that is not this engine's own
 //    executable to CPU priority "Idle", I/O priority and memory priority
 //    "Very low", EcoQoS (power throttling on) and no dynamic priority boost.
+//  * boost_chess_guis(): xiangqi GUIs of the same user, i.e. processes with a
+//    visible top-level window whose executable name contains "chess",
+//    "chessshark", "鲨鱼象棋", "象棋", "ethinker", "pengfeichess" or "pengfei"
+//    (case-insensitive) and not matched by idle_other_pikafish(), get CPU
+//    priority "High" (never lowered, Realtime is left alone) and are taken out
+//    of EcoQoS, so that the GUI (clocks, moves, input) stays responsive while
+//    the engine searches at "High".
 //  * plan_physical_core_pins(n): when n search threads fit on the physical
 //    cores, one logical processor (global index group * 64 + bit) per thread,
 //    each on a different physical core: performance cores first (hybrid CPUs),
@@ -65,6 +72,7 @@ void acquire_power_plan();
 void release_power_plan();
 bool run_power_watcher(int argc, char* argv[]);
 void idle_other_pikafish();
+void boost_chess_guis();
 void ensure_lock_pages_right();
 bool run_lock_pages_helper(int argc, char* argv[]);
 std::vector<int> plan_physical_core_pins(std::size_t threads);

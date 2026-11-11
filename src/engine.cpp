@@ -468,9 +468,13 @@ void Engine::stop() { threads.stop = true; }
 
 // Windows: other processes whose name contains "pikafish", "pika", "fish",
 // "cyclone" or "bugchess" (same user, not this executable) get CPU priority
-// "Idle" and I/O / memory priority "Very low"; called at start-up, isready and
-// ucinewgame.
-void Engine::idle_other_pikafish() const { WinPerf::idle_other_pikafish(); }
+// "Idle", I/O / memory priority "Very low" and EcoQoS; xiangqi GUIs (visible
+// window, name with "chess", "象棋", "ethinker", "pengfei" ...) get "High".
+// Called at start-up, isready and ucinewgame.
+void Engine::idle_other_pikafish() const {
+    WinPerf::idle_other_pikafish();
+    WinPerf::boost_chess_guis();
+}
 
 void Engine::search_clear() {
     wait_for_search_finished();

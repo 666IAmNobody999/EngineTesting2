@@ -51,6 +51,7 @@ void acquire_power_plan() {}
 void release_power_plan() {}
 bool run_power_watcher(int, char*[]) { return false; }
 void idle_other_pikafish() {}
+void boost_chess_guis() {}
 void ensure_lock_pages_right() {}
 bool run_lock_pages_helper(int, char*[]) { return false; }
 std::vector<int> plan_physical_core_pins(std::size_t) { return {}; }
@@ -723,6 +724,107 @@ void idle_other_pikafish() {
                 setInfo(h, ProcessMemoryPriority, &mem, sizeof(mem));
                 PowerThrottlingState pt{PowerThrottlingVersion, PowerThrottlingExecutionSpeed,
                                         PowerThrottlingExecutionSpeed};
+                setInfo(h, ProcessPowerThrottling, &pt, sizeof(pt));
+            }
+        }
+        CloseHandle(h);
+    }
+    CloseHandle(snap);
+}
+
+// Executable names (lower case, substring match) of the xiangqi GUIs raised to
+// "High": chess, chessshark, 鲨鱼象棋, 象棋, ethinker, pengfeichess, pengfei.
+constexpr const wchar_t* GuiNames[] = {L"chess",
+                                       L"chessshark",
+                                       L"\u9ca8\u9c7c\u8c61\u68cb",  // 鲨鱼象棋
+                                       L"\u8c61\u68cb",                // 象棋
+                                       L"ethinker",
+                                       L"pengfeichess",
+                                       L"pengfei"};
+
+static bool gui_name(const std::wstring& exe) {
+    const std::wstring name = lower(exe);
+    for (const wchar_t* n : GuiNames)
+        if (name.find(n) != std::wstring::npos)
+            return true;
+    return false;
+}
+
+using EnumWindowsFn              = BOOL(WINAPI*)(WNDENUMPROC, LPARAM);
+using IsWindowVisibleFn          = BOOL(WINAPI*)(HWND);
+using GetWindowFn                = HWND(WINAPI*)(HWND, UINT);
+using GetWindowThreadProcessIdFn = DWORD(WINAPI*)(HWND, LPDWORD);
+
+struct User32 {
+    EnumWindowsFn     enumWindows = load<EnumWindowsFn>(L"user32.dll", "EnumWindows");
+    IsWindowVisibleFn visible     = load<IsWindowVisibleFn>(L"user32.dll", "IsWindowVisible");
+    GetWindowFn       getWindow   = load<GetWindowFn>(L"user32.dll", "GetWindow");
+    GetWindowThreadProcessIdFn windowPid =
+      load<GetWindowThreadProcessIdFn>(L"user32.dll", "GetWindowThreadProcessId");
+
+    bool ok() const { return enumWindows && visible && getWindow && windowPid; }
+};
+
+static User32& user32() {
+    static User32 u;
+    return u;
+}
+
+// Processes owning a visible top-level window (GUIs; engines have none).
+static BOOL CALLBACK collect_window_pid(HWND hwnd, LPARAM out) {
+    if (user32().visible(hwnd) && !user32().getWindow(hwnd, GW_OWNER))
+    {
+        DWORD pid = 0;
+        user32().windowPid(hwnd, &pid);
+        if (pid)
+            reinterpret_cast<std::vector<DWORD>*>(out)->push_back(pid);
+    }
+    return TRUE;
+}
+
+void boost_chess_guis() {
+    if (!user32().ok())
+        return;
+
+    const DWORD             selfPid  = GetCurrentProcessId();
+    const std::wstring      selfPath = image_path(GetCurrentProcess());
+    const std::vector<BYTE> selfUser = token_user(GetCurrentProcess());
+    if (selfPath.empty() || selfUser.empty())
+        return;
+
+    std::vector<DWORD> windowed;
+    user32().enumWindows(collect_window_pid, reinterpret_cast<LPARAM>(&windowed));
+    if (windowed.empty())
+        return;
+    std::sort(windowed.begin(), windowed.end());
+
+    static auto setInfo = load<SetProcessInformationFn>(L"kernel32.dll", "SetProcessInformation");
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE)
+        return;
+
+    PROCESSENTRY32W e{};
+    e.dwSize = sizeof(e);
+    for (BOOL ok = Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e))
+    {
+        if (e.th32ProcessID == selfPid || idle_name(e.szExeFile) || !gui_name(e.szExeFile)
+            || !std::binary_search(windowed.begin(), windowed.end(), e.th32ProcessID))
+            continue;
+
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION, FALSE,
+                               e.th32ProcessID);
+        if (!h)
+            continue;  // other users / elevated GUIs are never touched
+
+        if (same_user(token_user(h), selfUser) && image_path(h) != selfPath)
+        {
+            const DWORD pc = GetPriorityClass(h);
+            if (pc && pc != HIGH_PRIORITY_CLASS && pc != REALTIME_PRIORITY_CLASS)
+                SetPriorityClass(h, HIGH_PRIORITY_CLASS);
+            if (setInfo)
+            {
+                PowerThrottlingState pt{PowerThrottlingVersion, PowerThrottlingExecutionSpeed, 0};
                 setInfo(h, ProcessPowerThrottling, &pt, sizeof(pt));
             }
         }
