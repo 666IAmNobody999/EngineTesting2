@@ -892,10 +892,13 @@ std::vector<int> plan_physical_core_pins(std::size_t threads) {
 bool pin_current_thread(int cpu) {
     if (cpu < 0)
         return false;
-    GROUP_AFFINITY ga{};
-    ga.Group = WORD(cpu / 64);
-    ga.Mask  = KAFFINITY(1) << (cpu % 64);
-    return SetThreadGroupAffinity(GetCurrentThread(), &ga, nullptr) != 0;
+    // Soft hint only ("ideal processor"): Windows runs the thread there when it
+    // can, but moves it to another processor when that one is busy (other
+    // games, the GUI, the SMT sibling in use), so it is never stuck waiting.
+    PROCESSOR_NUMBER pn{};
+    pn.Group  = WORD(cpu / 64);
+    pn.Number = BYTE(cpu % 64);
+    return SetThreadIdealProcessorEx(GetCurrentThread(), &pn, nullptr) != 0;
 }
 
 

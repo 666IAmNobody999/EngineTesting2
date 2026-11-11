@@ -146,7 +146,7 @@ class ThreadPool {
     void                   wait_for_search_finished() const;
 
     std::vector<usize> get_bound_thread_to_numa_node() const;
-    // Logical processor of each search thread pinned to its own physical core
+    // Ideal logical processor of each search thread, on its own physical core
     // (Windows, NumaPolicy "auto" without NUMA binding); empty when not pinned.
     const std::vector<int>& get_core_pins() const { return corePins; }
     std::vector<usize> get_bound_thread_count_by_numa_node() const;

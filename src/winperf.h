@@ -52,7 +52,8 @@
 //    the core of logical processor 0 last (it serves most interrupts and OS
 //    work), only processors in the process affinity. Empty otherwise (more
 //    threads than physical cores, or not Windows).
-//  * pin_current_thread(cpu): hard-binds the calling thread to that processor.
+//  * pin_current_thread(cpu): makes that processor the calling thread's ideal
+//    processor (a soft hint, no hard affinity: Windows may still move it).
 //  * run_power_watcher(): returns true when this process is such a watcher;
 //    main() must then return immediately.
 //  * ensure_lock_pages_right(): Large Pages need the account right "Lock pages

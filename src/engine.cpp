@@ -714,7 +714,7 @@ std::string Engine::thread_allocation_information_as_string() const {
     const auto& pins = threads.get_core_pins();
     if (!pins.empty())
     {
-        ss << " pinned to physical cores (logical processors ";
+        ss << " preferring physical cores (logical processors ";
         for (usize i = 0; i < pins.size(); ++i)
             ss << (i ? "," : "") << pins[i];
         ss << ")";

@@ -257,9 +257,9 @@ void ThreadPool::set(const NumaConfig&                           numaConfig,
                 create_thread();
         }
 
-        // Windows: when the threads fit on the physical cores, hard-bind each one
-        // to its own core (one logical processor per core, so no two search
-        // threads share a core through SMT). Only with the default NumaPolicy
+        // Windows: when the threads fit on the physical cores, give each one its
+        // own core as ideal processor (one logical processor per core, so no two
+        // search threads prefer the same core through SMT). Soft hint only. Only with the default NumaPolicy
         // "auto" when no NUMA binding is in use; "none" disables it.
         if (numaPolicy == "auto" && !doBindThreads)
         {
