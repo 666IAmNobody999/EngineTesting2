@@ -734,6 +734,7 @@ void idle_other_pikafish() {
 
 // Executable names (lower case, substring match) of the xiangqi GUIs raised to
 // "High": chess, chessshark, 鲨鱼象棋, 象棋, ethinker, pengfeichess, pengfei.
+// explorer.exe (exact name) is raised too, keeping the Windows shell smooth.
 constexpr const wchar_t* GuiNames[] = {L"chess",
                                        L"chessshark",
                                        L"\u9ca8\u9c7c\u8c61\u68cb",  // 鲨鱼象棋
@@ -744,6 +745,8 @@ constexpr const wchar_t* GuiNames[] = {L"chess",
 
 static bool gui_name(const std::wstring& exe) {
     const std::wstring name = lower(exe);
+    if (name == L"explorer.exe")  // Windows shell: taskbar, desktop, file windows
+        return true;
     for (const wchar_t* n : GuiNames)
         if (name.find(n) != std::wstring::npos)
             return true;
