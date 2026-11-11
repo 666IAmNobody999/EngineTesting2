@@ -24,6 +24,11 @@
 
 // Windows-only process tuning. Every function is a no-op on other platforms.
 //
+// Engine-league test build: the power plan, CPU priority "High" for this
+// engine and idling other engines are switched off in winperf.cpp
+// (UsePowerPlan / RaiseSelfToHigh / IdleOtherEngines); the engine then only
+// keeps itself at CPU priority "Normal" or above.
+//
 //  * apply_process_tuning(): CPU priority "High", I/O priority "High",
 //    memory priority "Normal" and dynamic thread priority boost enabled.
 //    Cheap enough to be re-applied before every search (GUIs may reset them).
