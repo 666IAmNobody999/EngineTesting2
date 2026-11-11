@@ -84,15 +84,6 @@ bool             pin_current_thread(int) { return false; }
 
 namespace Stockfish::WinPerf {
 
-// Engine-league test build switches (the code stays, it is only switched off):
-//  * UsePowerPlan:     switch Windows to the "幻神终极效能" power plan.
-//  * RaiseSelfToHigh:  CPU priority "High" for this engine; when false the
-//                      engine only makes sure it is at least "Normal".
-//  * IdleOtherEngines: other engines to "Idle" / EcoQoS (idle_other_pikafish).
-constexpr bool UsePowerPlan     = false;
-constexpr bool RaiseSelfToHigh  = false;
-constexpr bool IdleOtherEngines = false;
-
 namespace {
 
 // All system calls below are resolved at run time, so the engine still starts on
@@ -517,18 +508,9 @@ BOOL WINAPI console_handler(DWORD type) {
 void apply_process_tuning() {
     HANDLE proc = GetCurrentProcess();
 
-    // 1. CPU priority: High, or (test build) at least Normal.
-    if (RaiseSelfToHigh)
-    {
-        if (GetPriorityClass(proc) != HIGH_PRIORITY_CLASS)
-            SetPriorityClass(proc, HIGH_PRIORITY_CLASS);
-    }
-    else
-    {
-        const DWORD pc = GetPriorityClass(proc);
-        if (pc == IDLE_PRIORITY_CLASS || pc == BELOW_NORMAL_PRIORITY_CLASS)
-            SetPriorityClass(proc, NORMAL_PRIORITY_CLASS);
-    }
+    // 1. CPU priority: High.
+    if (GetPriorityClass(proc) != HIGH_PRIORITY_CLASS)
+        SetPriorityClass(proc, HIGH_PRIORITY_CLASS);
 
     // 2. Dynamic thread priority boost on (FALSE = boost not disabled).
     BOOL boostDisabled = FALSE;
@@ -576,7 +558,7 @@ void apply_process_tuning() {
 }
 
 void acquire_power_plan() {
-    if (!UsePowerPlan || powerAcquired.load() || !power().ok())
+    if (powerAcquired.load() || !power().ok())
         return;
 
     Instance self{GetCurrentProcessId(), {}};
@@ -695,9 +677,6 @@ static bool idle_name(const std::wstring& exe) {
 }
 
 void idle_other_pikafish() {
-    if (!IdleOtherEngines)
-        return;
-
     const DWORD             selfPid  = GetCurrentProcessId();
     const std::wstring      selfPath = image_path(GetCurrentProcess());
     const std::vector<BYTE> selfUser = token_user(GetCurrentProcess());
