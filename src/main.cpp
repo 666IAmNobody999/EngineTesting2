@@ -66,10 +66,8 @@ int main(int argc, char* argv[]) {
             std::cout << to_output_codepage(HS_STR("info string [授权状态] ") + auth_msg) << std::endl;
     }
 
-    // Windows: "幻神终极效能" power plan while the engine runs (switched off in
-    // the 特調測試版, see WinPerf::UsePowerPlan).
-    if constexpr (WinPerf::UsePowerPlan)
-        WinPerf::acquire_power_plan();
+    // Windows: "幻神终极效能" power plan while the engine runs.
+    WinPerf::acquire_power_plan();
 
     // Windows: make sure Large Pages can be used ("Lock pages in memory").
     WinPerf::ensure_lock_pages_right();

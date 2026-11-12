@@ -24,13 +24,8 @@
 
 // Windows-only process tuning. Every function is a no-op on other platforms.
 //
-//  特調測試版 (special test build): the power plan is switched off (UsePowerPlan,
-//  the code is kept), the engine's own CPU priority is only kept at "Normal" or
-//  above (never raised to "High"), and other engines keep their CPU priority.
-//
-//  * apply_process_tuning(): CPU priority at least "Normal" (not raised to
-//    "High"), I/O priority "High", memory priority "Normal", dynamic thread
-//    priority boost enabled and out of EcoQoS.
+//  * apply_process_tuning(): CPU priority "High", I/O priority "High",
+//    memory priority "Normal" and dynamic thread priority boost enabled.
 //    Cheap enough to be re-applied before every search (GUIs may reset them).
 //  * acquire_power_plan() / release_power_plan(): switch Windows to the
 //    engine's "幻神终极效能" power plan (Bitsum Highest Performance settings:
@@ -42,9 +37,8 @@
 //  * idle_other_pikafish(): sets every other process of the same user whose
 //    executable name contains "pikafish", "pika", "fish", "cyclone" or
 //    "bugchess" (case-insensitive) and that is not this engine's own
-//    executable to I/O priority and memory priority "Very low", EcoQoS (power
-//    throttling on) and no dynamic priority boost; their CPU priority is not
-//    changed.
+//    executable to CPU priority "Idle", I/O priority and memory priority
+//    "Very low", EcoQoS (power throttling on) and no dynamic priority boost.
 //  * boost_chess_guis(): xiangqi GUIs of the same user, i.e. processes with a
 //    visible top-level window whose executable name contains "chess",
 //    "chessshark", "鲨鱼象棋", "象棋", "ethinker", "pengfeichess" or "pengfei"
@@ -73,9 +67,6 @@
 //    then return immediately.
 
 namespace Stockfish::WinPerf {
-
-// 特調測試版: false = the "幻神终极效能" power plan is not used (code kept).
-constexpr bool UsePowerPlan = false;
 
 void apply_process_tuning();
 void acquire_power_plan();
