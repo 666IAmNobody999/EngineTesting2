@@ -1491,25 +1491,25 @@ bool Position::mate_threat_without(Square s) const {
 
     const std::string f   = fen();
     const size_t      end = f.find(' ');
-    std::string       board;
+    std::string       placement;
     int               r = RANK_9, file = FILE_A;
     for (size_t i = 0; i < end; ++i)
     {
         const char c = f[i];
         if (c == '/')
         {
-            board += c;
+            placement += c;
             --r;
             file = FILE_A;
         }
         else if (c >= '1' && c <= '9')
         {
-            board.append(size_t(c - '0'), '1');
+            placement.append(size_t(c - '0'), '1');
             file += c - '0';
         }
         else
         {
-            board += make_square(File(file), Rank(r)) == s ? '1' : c;
+            placement += make_square(File(file), Rank(r)) == s ? '1' : c;
             ++file;
         }
     }
@@ -1517,7 +1517,7 @@ bool Position::mate_threat_without(Square s) const {
     // Re-compress runs of empty squares.
     std::string packed;
     int         run = 0;
-    for (char c : board)
+    for (char c : placement)
     {
         if (c == '1')
         {
@@ -1536,6 +1536,165 @@ bool Position::mate_threat_without(Square s) const {
     if (tmp.set(packed + f.substr(end), &si))
         return true;  // cannot tell: keep the threat
     return tmp.has_mate_threat();
+}
+
+
+// Collects up to maxPlies SkyMoveRecords of the moves leading to this position, most
+// recent first, on a scratch copy (the board is rolled back, nothing is written to
+// the shared StateInfo chain). Returns the number of records.
+int Position::sky_records(SkyMoveRecord* out, int maxPlies) {
+
+    Position scratch;
+    std::memcpy((void*) &scratch, (const void*) this, offsetof(Position, filter));
+    std::memcpy((void*) scratch.idBoard, (const void*) idBoard, sizeof(idBoard));
+
+    int n = 0;
+    while (n < maxPlies && scratch.st && scratch.st->previous && scratch.st->move.is_ok())
+    {
+        StateInfo*    cur   = scratch.st;
+        const Color   mover = ~scratch.sideToMove;
+        SkyMoveRecord r{};
+        r.check   = bool(cur->checkersBB);
+        r.capture = cur->capturedPiece != NO_PIECE;
+        r.evasion = bool(cur->previous->checkersBB);
+
+        if (r.check)
+        {
+            Bitboard checks = cur->checkersBB;
+            while (checks)
+                r.checkers |= u16(1u << scratch.idBoard[pop_lsb(checks)]);
+        }
+
+        if (r.capture)
+        {
+            scratch.undo_move(cur->move, cur->capturedPiece, cur->skyCapturedId);
+            scratch.st = cur->previous;
+        }
+        else
+        {
+            SkyChaseMap after = scratch.sky_chased(mover);
+            scratch.undo_move(cur->move, NO_PIECE, 0);
+            scratch.st         = cur->previous;
+            SkyChaseMap before = scratch.sky_chased(mover);
+            SkyChaseMap exact  = after.exact_diff(before);
+            r.victims          = exact.victims();
+            r.chasers          = exact.chasers();
+        }
+        out[n++] = r;
+    }
+    return n;
+}
+
+
+namespace {
+
+// Replays the天天象棋 counters of one side over its own moves (oldest first) and tells
+// whether the last move exceeds one of them:
+//   长捉一子 6 回合（第 7 次捉强制变招）；分捉另一子时清空前一子被捉次数；应将产生的捉
+//   算捉，被捉次数保留但不增加；将捉同时出现优先算将，清空之前的被捉次数。
+//   连续将军：每子 6 回合（单子 6、两子 12、三子 18）。
+//   将捉交替：单子 12 回合，一子以上 18 回合。
+//   吃子后清空所有将和捉次数，当前次数为零。
+bool sky_last_move_exceeds(const SkyMoveRecord* const* moves, int n) {
+
+    u8   chaseCnt[16] = {}, checkCnt[16] = {};
+    int  alt = 0;
+    u16  altIds = 0;
+    bool altCheck = false, altChase = false;
+
+    auto reset_all = [&]() {
+        std::memset(chaseCnt, 0, sizeof(chaseCnt));
+        std::memset(checkCnt, 0, sizeof(checkCnt));
+        alt      = 0;
+        altIds   = 0;
+        altCheck = altChase = false;
+    };
+
+    bool exceeded = false;
+    for (int k = 0; k < n; ++k)
+    {
+        const SkyMoveRecord& r = *moves[k];
+        exceeded               = false;
+
+        if (r.capture)
+        {
+            reset_all();
+            continue;
+        }
+        if (r.check)
+        {
+            std::memset(chaseCnt, 0, sizeof(chaseCnt));
+            for (int id = 0; id < 16; ++id)
+                if (r.checkers >> id & 1)
+                    exceeded |= ++checkCnt[id] > 6;
+            ++alt;
+            altIds |= r.checkers;
+            altCheck = true;
+        }
+        else if (r.victims)
+        {
+            std::memset(checkCnt, 0, sizeof(checkCnt));
+            for (int id = 0; id < 16; ++id)
+            {
+                if (!(r.victims >> id & 1))
+                    chaseCnt[id] = 0;
+                else if (!r.evasion)
+                    exceeded |= ++chaseCnt[id] > 6;
+            }
+            ++alt;
+            altIds |= r.chasers;
+            altChase = true;
+        }
+        else
+        {
+            reset_all();
+            continue;
+        }
+
+        if (altCheck && altChase && alt > ((altIds & u16(altIds - 1)) ? 18 : 12))
+            exceeded = true;
+    }
+    return exceeded;
+}
+
+constexpr int SkyCounterPlies = 2 * 19;  // the longest counter (18 own moves) + this move
+
+}  // namespace
+
+
+bool Position::sky_counter_forbidden(Move m) {
+
+    // The counters only bite after a streak of at least five offensive own moves
+    // without a capture; otherwise nothing can reach a limit (checked below on the
+    // history before the move itself is examined).
+    SkyMoveRecord hist[SkyCounterPlies];
+    const int     n = sky_records(hist, SkyCounterPlies - 1);
+
+    // Own moves of the side to move are hist[1], hist[3], ... (most recent first).
+    int own = 0;
+    for (int i = 1; i < n; i += 2)
+    {
+        if (hist[i].capture || (!hist[i].check && !hist[i].victims))
+            break;
+        ++own;
+    }
+    if (own < 5)
+        return false;
+
+    StateInfo si;
+    do_move(m, si);
+    SkyMoveRecord last;
+    const int     got = sky_records(&last, 1);
+    undo_move(m);
+    if (got != 1)
+        return false;
+
+    const SkyMoveRecord* seq[SkyCounterPlies];
+    int                  k = 0;
+    for (int i = 2 * own - 1; i >= 1; i -= 2)
+        seq[k++] = &hist[i];
+    seq[k++] = &last;
+    return sky_last_move_exceeds(seq, k);
 }
 
 
@@ -1572,9 +1731,12 @@ void Position::set_sky_info(int d) {
             while (checks)
                 checkers |= u16(1u << idBoard[pop_lsb(checks)]);
 
+            // 将捉同时出现: the victims chased by the checking move itself.
+            SkyChaseMap after = sky_chased(mover);
             undo_move(cur->move, NO_PIECE, 0);
             st = cur->previous;
-            sky_publish(cur, 0xFFFF, checkers, 0);
+            SkyChaseMap before = sky_chased(mover);
+            sky_publish(cur, 0xFFFF, checkers, after.exact_diff(before).victims());
             continue;
         }
 
@@ -1650,10 +1812,16 @@ Value Position::detect_sky_cycle(int d, int ply) {
         scratch.set_sky_info(d);
     }
 
-    auto checked  = [](const StateInfo* s) { return bool(s->checkersBB); };
     auto loss_for = [&](Color offender) {
         return offender == currentSide ? mated_in(ply) : mate_in(ply);
     };
+
+    auto checked = [](const StateInfo* s) { return bool(s->checkersBB); };
+    // A check that also creates a chase in the same move (将捉同时出现; for checking
+    // moves skyChasers holds the victims chased by that move) is a check inside the
+    // cycle, but does not mark the start of a check/chase streak (棋例9 / 19).
+    auto pure_check = [](const StateInfo* s) { return s->checkersBB && !s->skyChasers; };
+    auto offends    = [](const StateInfo* s) { return s->checkersBB || s->skyVictims; };
 
     // A made moves 0,2,4,... and is the opponent of the side to move now.
     const Color AColor = ~currentSide;
@@ -1697,28 +1865,37 @@ Value Position::detect_sky_cycle(int d, int ply) {
     const u16 A = common[0];
     const u16 B = common[1];
 
-    // 1. Check/chase alternation is forbidden in every case.
     const bool mixedA = anyCheck[0] && allOffend[0];
     const bool mixedB = anyCheck[1] && allOffend[1];
 
-    // 天天象棋 judges with per-side move counters, so who started first matters.
-    // For the two cases below (and only then) the offending streak of each side is
-    // followed back past the cycle: the number of own moves played right before the
-    // cycle that already had the same offending pattern. Equal streaks keep the
-    // in-cycle verdict.
-    //   pattern 0: check or chase (一将一捉); pattern != 0: chase of one of these victims.
-    auto pre_cycle_streaks = [&](u16 patternA, u16 patternB, int& extraA, int& extraB) {
-        constexpr int MaxExtraPlies = 64;
-        StateInfo*    ext[MaxExtraPlies];
-        int           m      = 0;
-        bool          cached = true;
+    // 天天象棋 judges with per-side counters, so who started first matters. Only for
+    // the verdicts below are the moves right before the cycle read as well (their Sky
+    // info is cached in the shared StateInfo chain like the cycle's own). all[i] is
+    // the state i plies back from now; side i & 1 (0 = A, 1 = B).
+    constexpr int MaxExtraPlies = 64;
+    StateInfo*    all[256 + MaxExtraPlies];
+    int           total    = 0;
+    auto          load_ext = [&]() {
+        if (total)
+            return;
+        if (d > 256)
+        {
+            for (int i = 0; i < 256; ++i)
+                all[total++] = q[i];
+            return;  // very long cycle: no pre-cycle information
+        }
+        for (int i = 0; i < d; ++i)
+            all[total++] = q[i];
+        int  m      = 0;
+        bool cached = true;
         for (StateInfo* p = q[d - 1]->previous; p && p->previous && m < MaxExtraPlies;
              p            = p->previous)
         {
             if (p->capturedPiece != NO_PIECE)
-                break;
-            ext[m++] = p;
+                break;  // 吃子后清空所有将和捉次数
+            all[total++] = p;
             cached &= sky_cached(p);
+            ++m;
         }
         if (!cached)
         {
@@ -1727,53 +1904,82 @@ Value Position::detect_sky_cycle(int d, int ply) {
             std::memcpy((void*) scratch.idBoard, (const void*) idBoard, sizeof(idBoard));
             scratch.set_sky_info(d + m);
         }
-        auto offends = [&](const StateInfo* x, u16 pattern) {
-            return pattern ? !checked(x) && (x->skyVictims & pattern)
-                           : checked(x) || x->skyVictims != 0;
-        };
-        // ext[0] is A's move when d is even (always: the cycle has both movers).
-        extraA = extraB = 0;
-        for (int j = 0; j < m && offends(ext[j], patternA) && sky_cached(ext[j]); j += 2)
-            ++extraA;
-        for (int j = 1; j < m && offends(ext[j], patternB) && sky_cached(ext[j]); j += 2)
-            ++extraB;
     };
 
+    // Oldest index of a side's streak of moves satisfying pred (-1 if none).
+    auto streak_oldest = [&](int side, auto pred) {
+        int oldest = -1;
+        for (int i = side; i < total && sky_cached(all[i]) && pred(all[i]); i += 2)
+            oldest = i;
+        return oldest;
+    };
+
+    // 1. Check/chase alternation (一将一捉) on one side.
     if (mixedA != mixedB)
     {
-        // Exception: a real perpetual chaser (common victim, no check) against the
-        // alternation changes when its chase began before the alternation did.
-        const int  chaser = mixedA ? 1 : 0;
-        const u16  victim = chaser ? B : A;
+        const int mixed  = mixedA ? 0 : 1;
+        const int chaser = mixed ^ 1;
+        const u16 victim = chaser ? B : A;
+
+        // Against a real perpetual chaser (common victim, no check):
+        //  - the chaser changes when it had already chased twice before the
+        //    alternation's first (pure) check;
+        //  - the alternating side changes when it had already played two check/chase
+        //    moves before the chase began;
+        //  - otherwise the chaser changes when more than one piece takes part in the
+        //    alternation (18 moves against 6), else the alternating side changes.
         if (!anyCheck[chaser] && victim)
         {
-            int extraA, extraB;
-            pre_cycle_streaks(chaser ? 0 : victim, chaser ? victim : 0, extraA, extraB);
-            const int extraChaser = chaser ? extraB : extraA;
-            const int extraMixed  = chaser ? extraA : extraB;
-            if (extraChaser > extraMixed)
-                return loss_for(chaser ? BColor : AColor);
+            load_ext();
+            auto chasing = [&](const StateInfo* x) {
+                return !x->checkersBB && (x->skyVictims & victim);
+            };
+            const int chaseOldest = streak_oldest(chaser, chasing);
+            const int mixedOldest = streak_oldest(mixed, offends);
 
-            // More than one piece alternating has the longer 18-move limit, so the
-            // chaser (6 moves) changes first.
-            const u16 ids = identities[chaser ^ 1];
+            int firstCheck = -1;
+            u16 ids        = 0;
+            for (int i = mixed; i <= mixedOldest; i += 2)
+            {
+                if (pure_check(all[i]))
+                    firstCheck = i;
+                ids |= checked(all[i]) ? all[i]->skyCheckers : all[i]->skyChasers;
+            }
+
+            int chasesBefore = 0, mixedBefore = 0;
+            for (int i = chaser; i <= chaseOldest; i += 2)
+                chasesBefore += i > firstCheck;
+            for (int i = mixed; i <= mixedOldest; i += 2)
+                mixedBefore += i > chaseOldest;
+
+            if (chasesBefore >= 2)
+                return loss_for(chaser ? BColor : AColor);
+            if (mixedBefore >= 2)
+                return loss_for(mixed ? BColor : AColor);
             if (ids & u16(ids - 1))
                 return loss_for(chaser ? BColor : AColor);
         }
-        return loss_for(mixedA ? AColor : BColor);
+        return loss_for(mixed ? BColor : AColor);
     }
 
-    // 2. Check/chase alternation on both sides: the side that started first changes;
-    //    otherwise 1 piece -> 12 moves, more -> 18 moves, the tighter limit changes,
-    //    equal limits are a draw.
+    // 2. Check/chase alternation on both sides: the side that started first changes
+    //    (a check that also chases does not start the streak); otherwise 1 piece ->
+    //    12 moves, more -> 18 moves, the tighter limit changes, equal limits are a draw.
     if (mixedA)
     {
-        int extraA, extraB;
-        pre_cycle_streaks(0, 0, extraA, extraB);
-        if (extraA != extraB)
-            return loss_for(extraA > extraB ? AColor : BColor);
+        load_ext();
+        int extra[2];
+        for (int side = 0; side < 2; ++side)
+        {
+            int oldest = streak_oldest(side, offends);
+            while (oldest >= d && checked(all[oldest]) && !pure_check(all[oldest]))
+                oldest -= 2;
+            extra[side] = oldest >= d ? (oldest - d - side) / 2 + 1 : 0;
+        }
+        if (extra[0] != extra[1])
+            return loss_for(extra[0] > extra[1] ? AColor : BColor);
 
-        auto multi = [](u16 ids) { return bool(ids & u16(ids - 1)); };
+        auto       multi  = [](u16 ids) { return bool(ids & u16(ids - 1)); };
         const bool multiA = multi(identities[0]);
         const bool multiB = multi(identities[1]);
         if (multiA != multiB)
@@ -1806,7 +2012,18 @@ Value Position::detect_sky_cycle(int d, int ply) {
     if (!A && B)
         return loss_for(BColor);
 
-    // 4. Pure chase against pure chase.
+    // 4. Pure chase against pure chase: the side that started chasing first changes.
+    if (!anyCheck[0] && !anyCheck[1])
+    {
+        load_ext();
+        auto chasingA = [&](const StateInfo* x) { return !x->checkersBB && (x->skyVictims & A); };
+        auto chasingB = [&](const StateInfo* x) { return !x->checkersBB && (x->skyVictims & B); };
+        const int oldA = streak_oldest(0, chasingA), oldB = streak_oldest(1, chasingB);
+        const int extraA = oldA >= d ? (oldA - d) / 2 + 1 : 0;
+        const int extraB = oldB >= d ? (oldB - d - 1) / 2 + 1 : 0;
+        if (extraA != extraB)
+            return loss_for(extraA > extraB ? AColor : BColor);
+    }
     return VALUE_DRAW;
 }
 

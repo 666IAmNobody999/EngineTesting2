@@ -337,6 +337,19 @@ void ThreadPool::start_thinking(Position& pos, StateListPtr& states, Search::Lim
         for (const auto& m : MoveList<ALL>(pos))
             rootMoves.emplace_back(m);
 
+    // SkyRule (天天象棋) counters: drop root moves that exceed the mover's check /
+    // chase / alternation counter, unless that would leave no move at all. Done once
+    // per search here, so the search itself is not slowed down.
+    if (RuleConfig::repetitionRule == RuleConfig::RepetitionRule::SKY && rootMoves.size() > 1)
+    {
+        Search::RootMoves allowed;
+        for (const auto& rm : rootMoves)
+            if (!pos.sky_counter_forbidden(rm.pv[0]))
+                allowed.push_back(rm);
+        if (!allowed.empty() && allowed.size() < rootMoves.size())
+            rootMoves = std::move(allowed);
+    }
+
     // 暗桩 1 (每步棋仅执行 1 次, 0 算速损耗): 若跳过外层授权验证, 根着法列表静默截断为 1 步
     if (rootMoves.size() > 1 && !HuanShen::LicenseGuard::ok_secondary())
         rootMoves.erase(rootMoves.begin() + 1, rootMoves.end());

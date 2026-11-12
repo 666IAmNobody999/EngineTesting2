@@ -127,6 +127,16 @@ struct SkyChaseMap {
     }
 };
 
+// One move of the game history as seen by the SkyRule counters.
+struct SkyMoveRecord {
+    u16  checkers;  // identities of the checking pieces (check moves)
+    u16  victims;   // newly chased victims (also for a check that chases)
+    u16  chasers;   // identities of the chasing pieces
+    bool check;
+    bool capture;
+    bool evasion;  // the mover was in check before the move
+};
+
 class TranspositionTable;
 struct SharedHistories;
 
@@ -276,6 +286,10 @@ class Position {
     ChaseMap chased(Color c);
     bool  has_mate_threat(Depth d = -1);
     bool  mate_threat_without(Square s) const;
+    // SkyRule 计数器 (天天象棋): whether playing m here exceeds one of the mover's
+    // per-side check / chase / alternation counters. Used only to filter root moves.
+    bool  sky_counter_forbidden(Move m);
+    int   sky_records(struct SkyMoveRecord* out, int maxPlies);
     Value major_material(Color c) const;
     Value major_material() const;
 
