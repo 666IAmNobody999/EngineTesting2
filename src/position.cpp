@@ -1592,19 +1592,19 @@ namespace {
 // whether the last move exceeds one of them:
 //   长捉一子 6 回合（第 7 次捉强制变招）；分捉另一子时清空前一子被捉次数；应将产生的捉
 //   算捉，被捉次数保留但不增加；将捉同时出现优先算将，清空之前的被捉次数。
-//   连续将军：每子 6 回合（单子 6、两子 12、三子 18）。
+//   连续将军：一子或多子造成的连续将军合共最多 6 次（第 7 次强制变招，棋例 26 / 28）。
 //   将捉交替：单子 12 回合，一子以上 18 回合。
 //   吃子后清空所有将和捉次数，当前次数为零。
 bool sky_last_move_exceeds(const SkyMoveRecord* const* moves, int n) {
 
-    u8   chaseCnt[16] = {}, checkCnt[16] = {};
-    int  alt = 0;
+    u8   chaseCnt[16] = {};
+    int  checkRun = 0, alt = 0;
     u16  altIds = 0;
     bool altCheck = false, altChase = false;
 
     auto reset_all = [&]() {
         std::memset(chaseCnt, 0, sizeof(chaseCnt));
-        std::memset(checkCnt, 0, sizeof(checkCnt));
+        checkRun = 0;
         alt      = 0;
         altIds   = 0;
         altCheck = altChase = false;
@@ -1624,16 +1624,14 @@ bool sky_last_move_exceeds(const SkyMoveRecord* const* moves, int n) {
         if (r.check)
         {
             std::memset(chaseCnt, 0, sizeof(chaseCnt));
-            for (int id = 0; id < 16; ++id)
-                if (r.checkers >> id & 1)
-                    exceeded |= ++checkCnt[id] > 6;
+            exceeded |= ++checkRun > 6;
             ++alt;
             altIds |= r.checkers;
             altCheck = true;
         }
         else if (r.victims)
         {
-            std::memset(checkCnt, 0, sizeof(checkCnt));
+            checkRun = 0;
             for (int id = 0; id < 16; ++id)
             {
                 if (!(r.victims >> id & 1))
