@@ -1484,6 +1484,61 @@ bool Position::has_mate_threat(Depth d) {
 }
 
 
+// QiZheRule helper: whether the side that just moved would still have a mate threat
+// if the piece on square s were not on the board. Only called after a threat has
+// been found during a repetition judgement, so the FEN round trip is not on any hot path.
+bool Position::mate_threat_without(Square s) const {
+
+    const std::string f   = fen();
+    const size_t      end = f.find(' ');
+    std::string       board;
+    int               r = RANK_9, file = FILE_A;
+    for (size_t i = 0; i < end; ++i)
+    {
+        const char c = f[i];
+        if (c == '/')
+        {
+            board += c;
+            --r;
+            file = FILE_A;
+        }
+        else if (c >= '1' && c <= '9')
+        {
+            board.append(size_t(c - '0'), '1');
+            file += c - '0';
+        }
+        else
+        {
+            board += make_square(File(file), Rank(r)) == s ? '1' : c;
+            ++file;
+        }
+    }
+
+    // Re-compress runs of empty squares.
+    std::string packed;
+    int         run = 0;
+    for (char c : board)
+    {
+        if (c == '1')
+        {
+            ++run;
+            continue;
+        }
+        if (run)
+            packed += char('0' + run), run = 0;
+        packed += c;
+    }
+    if (run)
+        packed += char('0' + run);
+
+    StateInfo si;
+    Position  tmp;
+    if (tmp.set(packed + f.substr(end), &si))
+        return true;  // cannot tell: keep the threat
+    return tmp.has_mate_threat();
+}
+
+
 // Fills the SkyRule state carried by each move while rolling the current line back.
 // Check and chase are classified as mutually exclusive move types; checking moves use
 // victims=0xffff and keep checker identities, while non-checking moves store the exact
@@ -1535,17 +1590,21 @@ void Position::set_sky_info(int d) {
 
 
 // SkyRule repetition classifier. A and B are the two alternating movers in the
-// repetition cycle. The verdict depends only on the moves inside the cycle, so the
-// same cycle is always judged the same way regardless of how it was entered.
+// repetition cycle. The verdict depends on the moves inside the cycle; only for
+// 长捉 vs 一将一捉 and for 一将一捉 on both sides are the moves right before the
+// cycle also read, to find which side started its offending streak first
+// (天天象棋 uses per-side move counters).
 //
 // SkyRule priorities (a cycle that repeats is treated as perpetual, i.e. every
 // per-side move limit below is eventually exceeded):
-//   1. Check/chase alternation (一将一捉 / 一捉一将) is forbidden in every case: a side
-//      whose cycle mixes checks with chasing moves changes, whatever the opponent
-//      does (idle, chase, or block-and-chase) and even if the chased pieces vary.
-//   2. Both sides alternate check/chase: one piece is limited to 12 moves, more
-//      than one piece to 18 moves; the side with the tighter limit changes,
-//      equal limits are a draw.
+//   1. Check/chase alternation (一将一捉 / 一捉一将): a side whose cycle mixes checks
+//      with chasing moves changes, whatever the opponent does (idle, chase, or
+//      block-and-chase) and even if the chased pieces vary. Exception against a
+//      real perpetual chaser: the chaser changes if its chase started before the
+//      alternation, or if more than one piece alternates (18 moves vs 6).
+//   2. Both sides alternate check/chase: the side that started first changes;
+//      otherwise one piece is limited to 12 moves, more than one piece to 18
+//      moves, the side with the tighter limit changes, equal limits are a draw.
 //   3. One side keeps a common victim, the other does not: the chaser changes.
 //   4. Both sides only chase: draw (one or more pieces chasing one piece share
 //      the same 6-move limit).
@@ -1641,12 +1700,79 @@ Value Position::detect_sky_cycle(int d, int ply) {
     // 1. Check/chase alternation is forbidden in every case.
     const bool mixedA = anyCheck[0] && allOffend[0];
     const bool mixedB = anyCheck[1] && allOffend[1];
-    if (mixedA != mixedB)
-        return loss_for(mixedA ? AColor : BColor);
 
-    // 2. Check/chase alternation on both sides: 1 piece -> 12 moves, more -> 18 moves.
+    // 天天象棋 judges with per-side move counters, so who started first matters.
+    // For the two cases below (and only then) the offending streak of each side is
+    // followed back past the cycle: the number of own moves played right before the
+    // cycle that already had the same offending pattern. Equal streaks keep the
+    // in-cycle verdict.
+    //   pattern 0: check or chase (一将一捉); pattern != 0: chase of one of these victims.
+    auto pre_cycle_streaks = [&](u16 patternA, u16 patternB, int& extraA, int& extraB) {
+        constexpr int MaxExtraPlies = 64;
+        StateInfo*    ext[MaxExtraPlies];
+        int           m      = 0;
+        bool          cached = true;
+        for (StateInfo* p = q[d - 1]->previous; p && p->previous && m < MaxExtraPlies;
+             p            = p->previous)
+        {
+            if (p->capturedPiece != NO_PIECE)
+                break;
+            ext[m++] = p;
+            cached &= sky_cached(p);
+        }
+        if (!cached)
+        {
+            Position scratch;
+            std::memcpy((void*) &scratch, (const void*) this, offsetof(Position, filter));
+            std::memcpy((void*) scratch.idBoard, (const void*) idBoard, sizeof(idBoard));
+            scratch.set_sky_info(d + m);
+        }
+        auto offends = [&](const StateInfo* x, u16 pattern) {
+            return pattern ? !checked(x) && (x->skyVictims & pattern)
+                           : checked(x) || x->skyVictims != 0;
+        };
+        // ext[0] is A's move when d is even (always: the cycle has both movers).
+        extraA = extraB = 0;
+        for (int j = 0; j < m && offends(ext[j], patternA) && sky_cached(ext[j]); j += 2)
+            ++extraA;
+        for (int j = 1; j < m && offends(ext[j], patternB) && sky_cached(ext[j]); j += 2)
+            ++extraB;
+    };
+
+    if (mixedA != mixedB)
+    {
+        // Exception: a real perpetual chaser (common victim, no check) against the
+        // alternation changes when its chase began before the alternation did.
+        const int  chaser = mixedA ? 1 : 0;
+        const u16  victim = chaser ? B : A;
+        if (!anyCheck[chaser] && victim)
+        {
+            int extraA, extraB;
+            pre_cycle_streaks(chaser ? 0 : victim, chaser ? victim : 0, extraA, extraB);
+            const int extraChaser = chaser ? extraB : extraA;
+            const int extraMixed  = chaser ? extraA : extraB;
+            if (extraChaser > extraMixed)
+                return loss_for(chaser ? BColor : AColor);
+
+            // More than one piece alternating has the longer 18-move limit, so the
+            // chaser (6 moves) changes first.
+            const u16 ids = identities[chaser ^ 1];
+            if (ids & u16(ids - 1))
+                return loss_for(chaser ? BColor : AColor);
+        }
+        return loss_for(mixedA ? AColor : BColor);
+    }
+
+    // 2. Check/chase alternation on both sides: the side that started first changes;
+    //    otherwise 1 piece -> 12 moves, more -> 18 moves, the tighter limit changes,
+    //    equal limits are a draw.
     if (mixedA)
     {
+        int extraA, extraB;
+        pre_cycle_streaks(0, 0, extraA, extraB);
+        if (extraA != extraB)
+            return loss_for(extraA > extraB ? AColor : BColor);
+
         auto multi = [](u16 ids) { return bool(ids & u16(ids - 1)); };
         const bool multiA = multi(identities[0]);
         const bool multiB = multi(identities[1]);
@@ -1794,11 +1920,17 @@ Value Position::detect_chases(int d, int ply) {
             ChaseMap after = chased(mover);
             bool     kill  = RuleConfig::mateThreatDepth > 0 && has_mate_threat();
 
+            // QiZheRule「当前走的棋子造成杀，才算杀」: the threat must disappear when
+            // the piece just moved is taken off the board, so a threat made by another
+            // piece (e.g. uncovered by this move) is not a kill. A king cannot be
+            // removed; for a king move the threat must simply be new.
+            const bool kingMove = type_of(piece_on(cur->move.to_sq())) == KING;
+            if (kill && qizheRule && !kingMove)
+                kill = !mate_threat_without(cur->move.to_sq());
+
             step_back();
 
-            // QiZheRule: the threat must be created by this move (none before it,
-            // the mover being the side to move again after step_back()).
-            if (kill && qizheRule && has_mate_threat(0))
+            if (kill && qizheRule && kingMove && has_mate_threat(0))
                 kill = false;
 
             if (kill)

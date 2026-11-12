@@ -275,6 +275,7 @@ class Position {
     // the "常捉无根子" detector shared by AsianRule, SkyRule and YiTianRule.
     ChaseMap chased(Color c);
     bool  has_mate_threat(Depth d = -1);
+    bool  mate_threat_without(Square s) const;
     Value major_material(Color c) const;
     Value major_material() const;
 
