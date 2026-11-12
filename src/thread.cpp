@@ -337,14 +337,18 @@ void ThreadPool::start_thinking(Position& pos, StateListPtr& states, Search::Lim
         for (const auto& m : MoveList<ALL>(pos))
             rootMoves.emplace_back(m);
 
-    // SkyRule (天天象棋) counters: drop root moves that exceed the mover's check /
+    // SkyRule (天天象棋) / QiZheRule (棋者象棋) counters: drop root moves that exceed the mover's check /
     // chase / alternation counter, unless that would leave no move at all. Done once
     // per search here, so the search itself is not slowed down.
-    if (RuleConfig::repetitionRule == RuleConfig::RepetitionRule::SKY && rootMoves.size() > 1)
+    if ((RuleConfig::repetitionRule == RuleConfig::RepetitionRule::SKY
+         || RuleConfig::repetitionRule == RuleConfig::RepetitionRule::QIZHE)
+        && rootMoves.size() > 1)
     {
+        SkyMoveRecord     hist[SkyCounterPlies];
+        const int         own = pos.sky_counter_history(hist);
         Search::RootMoves allowed;
         for (const auto& rm : rootMoves)
-            if (!pos.sky_counter_forbidden(rm.pv[0]))
+            if (!pos.sky_counter_forbidden(rm.pv[0], hist, own))
                 allowed.push_back(rm);
         if (!allowed.empty() && allowed.size() < rootMoves.size())
             rootMoves = std::move(allowed);

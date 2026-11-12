@@ -135,7 +135,11 @@ struct SkyMoveRecord {
     bool check;
     bool capture;
     bool evasion;  // the mover was in check before the move
+    bool kill;     // QiZheRule only: a non-checking move that makes a kill (杀)
 };
+
+// Records needed by the root counters: the longest counter (18 own moves) + this move.
+constexpr int SkyCounterPlies = 2 * 19;
 
 class TranspositionTable;
 struct SharedHistories;
@@ -288,8 +292,9 @@ class Position {
     bool  mate_threat_without(Square s) const;
     // SkyRule 计数器 (天天象棋): whether playing m here exceeds one of the mover's
     // per-side check / chase / alternation counters. Used only to filter root moves.
-    bool  sky_counter_forbidden(Move m);
-    int   sky_records(struct SkyMoveRecord* out, int maxPlies);
+    int   sky_counter_history(struct SkyMoveRecord* hist);
+    bool  sky_counter_forbidden(Move m, const struct SkyMoveRecord* hist, int own);
+    int   sky_records(struct SkyMoveRecord* out, int maxPlies, int killParity = -1);
     Value major_material(Color c) const;
     Value major_material() const;
 

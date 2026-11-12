@@ -1542,7 +1542,7 @@ bool Position::mate_threat_without(Square s) const {
 // Collects up to maxPlies SkyMoveRecords of the moves leading to this position, most
 // recent first, on a scratch copy (the board is rolled back, nothing is written to
 // the shared StateInfo chain). Returns the number of records.
-int Position::sky_records(SkyMoveRecord* out, int maxPlies) {
+int Position::sky_records(SkyMoveRecord* out, int maxPlies, int killParity) {
 
     Position scratch;
     std::memcpy((void*) &scratch, (const void*) this, offsetof(Position, filter));
@@ -1572,6 +1572,15 @@ int Position::sky_records(SkyMoveRecord* out, int maxPlies) {
         }
         else
         {
+            // QiZheRule「当前走的棋子造成杀，才算杀」, judged as in detect_chases():
+            // the threat must disappear without the moved piece (a king move: the
+            // threat must be new). A check is counted as a check, never as a kill.
+            const bool kingMove = type_of(scratch.piece_on(cur->move.to_sq())) == KING;
+            bool       kill     = (n & 1) == killParity && !r.check && RuleConfig::mateThreatDepth > 0
+                         && scratch.has_mate_threat();
+            if (kill && !kingMove)
+                kill = !scratch.mate_threat_without(cur->move.to_sq());
+
             SkyChaseMap after = scratch.sky_chased(mover);
             scratch.undo_move(cur->move, NO_PIECE, 0);
             scratch.st         = cur->previous;
@@ -1579,6 +1588,7 @@ int Position::sky_records(SkyMoveRecord* out, int maxPlies) {
             SkyChaseMap exact  = after.exact_diff(before);
             r.victims          = exact.victims();
             r.chasers          = exact.chasers();
+            r.kill             = kill && !(kingMove && scratch.has_mate_threat(0));
         }
         out[n++] = r;
     }
@@ -1595,16 +1605,20 @@ namespace {
 //   连续将军：一子或多子造成的连续将军合共最多 6 次（第 7 次强制变招，棋例 26 / 28）。
 //   将捉交替：单子 12 回合，一子以上 18 回合。
 //   吃子后清空所有将和捉次数，当前次数为零。
+// QiZheRule（棋者象棋，实测与天天象棋相同）另计「杀」（将军优先于杀，杀优先于捉）：
+//   单子长杀、多子长杀、一捉一杀、一将一杀，第 7 次杀判变招。杀不算捉，不增加也不
+//   清空被捉次数；杀会中断连续将军。
 bool sky_last_move_exceeds(const SkyMoveRecord* const* moves, int n) {
 
     u8   chaseCnt[16] = {};
-    int  checkRun = 0, alt = 0;
+    int  checkRun = 0, killCnt = 0, alt = 0;
     u16  altIds = 0;
     bool altCheck = false, altChase = false;
 
     auto reset_all = [&]() {
         std::memset(chaseCnt, 0, sizeof(chaseCnt));
         checkRun = 0;
+        killCnt  = 0;
         alt      = 0;
         altIds   = 0;
         altCheck = altChase = false;
@@ -1628,6 +1642,12 @@ bool sky_last_move_exceeds(const SkyMoveRecord* const* moves, int n) {
             ++alt;
             altIds |= r.checkers;
             altCheck = true;
+        }
+        else if (r.kill)
+        {
+            checkRun = 0;
+            exceeded |= ++killCnt > 6;
+            continue;  // not part of the check/chase alternation count
         }
         else if (r.victims)
         {
@@ -1655,34 +1675,40 @@ bool sky_last_move_exceeds(const SkyMoveRecord* const* moves, int n) {
     return exceeded;
 }
 
-constexpr int SkyCounterPlies = 2 * 19;  // the longest counter (18 own moves) + this move
-
 }  // namespace
 
 
-bool Position::sky_counter_forbidden(Move m) {
+// Collects the history for the root counters once per search: hist[] gets the
+// records most recent first (own moves of the side to move at odd indices; QiZheRule
+// kills are judged for those only). Returns the number of consecutive offensive own
+// moves, or 0 when nothing can reach a limit (fewer than five).
+int Position::sky_counter_history(SkyMoveRecord* hist) {
 
-    // The counters only bite after a streak of at least five offensive own moves
-    // without a capture; otherwise nothing can reach a limit (checked below on the
-    // history before the move itself is examined).
-    SkyMoveRecord hist[SkyCounterPlies];
-    const int     n = sky_records(hist, SkyCounterPlies - 1);
+    const bool kills = RuleConfig::repetitionRule == RuleConfig::RepetitionRule::QIZHE;
+    const int  n     = sky_records(hist, SkyCounterPlies - 1, kills ? 1 : -1);
 
-    // Own moves of the side to move are hist[1], hist[3], ... (most recent first).
     int own = 0;
     for (int i = 1; i < n; i += 2)
     {
-        if (hist[i].capture || (!hist[i].check && !hist[i].victims))
+        if (hist[i].capture || (!hist[i].check && !hist[i].victims && !hist[i].kill))
             break;
         ++own;
     }
-    if (own < 5)
+    return own < 5 ? 0 : own;
+}
+
+
+bool Position::sky_counter_forbidden(Move m, const SkyMoveRecord* hist, int own) {
+
+    if (!own)
         return false;
+
+    const bool kills = RuleConfig::repetitionRule == RuleConfig::RepetitionRule::QIZHE;
 
     StateInfo si;
     do_move(m, si);
     SkyMoveRecord last;
-    const int     got = sky_records(&last, 1);
+    const int     got = sky_records(&last, 1, kills ? 0 : -1);
     undo_move(m);
     if (got != 1)
         return false;
