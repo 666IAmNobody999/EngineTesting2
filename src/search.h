@@ -232,6 +232,8 @@ namespace Attack {
 // evaluation or Bare King shaping, but below the mate range, so the root only
 // plays such a move when every other move is mated.
 constexpr Value AvoidRepetitionValue = 20000;
+// Avoid_Repetition applies only while the best score is at least this (cp).
+constexpr int AvoidRepetitionCp = 100;
 // Which behaviours a mode switches on
 constexpr bool bare_king(AttackMode m) {
     return m == AttackMode::BARE_KING || m == AttackMode::HUMAN_LIKE_BARE_KING;
@@ -509,6 +511,7 @@ class Worker {
     Color     rootColor  = WHITE;
     AttackMode attackMode = AttackMode::BEST_MOVE;
     bool       avoidRepetition = false;
+    bool       avoidRepetitionOpt = false;
 
     // Bare King helpers (see AttackMode). Both are no-ops in BEST_MOVE mode.
     Value attack_shape_eval(Value v, const Position& pos) const;

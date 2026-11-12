@@ -317,7 +317,9 @@ bool Search::Worker::iterative_deepening() {
     rootColor  = rootPos.side_to_move();
     attackMode = Attack::parse(options);
     // Forced Draw looks for draws on purpose, so it keeps repetitions.
-    avoidRepetition = bool(options["Avoid_Repetition"]) && attackMode != AttackMode::FORCED_DRAW;
+    // The other modes avoid a repetition only while clearly better (see below).
+    avoidRepetitionOpt = bool(options["Avoid_Repetition"]) && attackMode != AttackMode::FORCED_DRAW;
+    avoidRepetition    = false;
 
     // Forced Draw picks, among several root moves, the one closest to a draw.
     if (attackMode == AttackMode::FORCED_DRAW)
@@ -398,6 +400,13 @@ bool Search::Worker::iterative_deepening() {
             rootMoves[i].previousPV         = rootMoves[i].pv;
             rootMoves[i].previousScoreExact = i < lines;
         }
+
+        // Avoid_Repetition: refuse a draw by repetition only while the last
+        // iteration's best score is at least AvoidRepetitionCp. Below it, a
+        // repetition is scored as a normal draw, so a worse side can hold it.
+        avoidRepetition =
+          avoidRepetitionOpt
+          && UCIEngine::to_cp_normalized(rootMoves[0].score, rootPos) >= Attack::AvoidRepetitionCp;
 
         usize pvFirst = 0;
         pvLast        = rootMoves.size();
