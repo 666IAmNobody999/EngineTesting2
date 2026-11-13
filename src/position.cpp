@@ -1792,11 +1792,14 @@ void Position::set_sky_info(int d) {
 //      otherwise one piece is limited to 12 moves, more than one piece to 18
 //      moves, the side with the tighter limit changes, equal limits are a draw.
 //   3. One side keeps a common victim, the other does not: the chaser changes.
-//   4. Both sides only chase: draw (one or more pieces chasing one piece share
-//      the same 6-move limit).
+//   4. Both sides only chase (长捉 vs 长捉), each keeping a common victim: both
+//      chase counters (6 moves) run down, so the side that started its chase
+//      first exceeds first and changes. Draw only when that cannot be told.
+// chaseOnly (QiZheRule, whose own classifier found both sides forbidden): only
+// verdict 4 is given, anything else is a draw.
 // Pure perpetual check on one or both sides is handled by rule_judge() before
 // this function is called ("一方长将，一方长捉，长将方禁招").
-Value Position::detect_sky_cycle(int d, int ply) {
+Value Position::detect_sky_cycle(int d, int ply, bool chaseOnly) {
 
     if (d < 4 || !st)
         return VALUE_DRAW;
@@ -1889,6 +1892,9 @@ Value Position::detect_sky_cycle(int d, int ply) {
     const u16 A = common[0];
     const u16 B = common[1];
 
+    if (chaseOnly && (anyCheck[0] || anyCheck[1] || !A || !B))
+        return VALUE_DRAW;
+
     const bool mixedA = anyCheck[0] && allOffend[0];
     const bool mixedB = anyCheck[1] && allOffend[1];
 
@@ -1899,6 +1905,7 @@ Value Position::detect_sky_cycle(int d, int ply) {
     constexpr int MaxExtraPlies = 64;
     StateInfo*    all[256 + MaxExtraPlies];
     int           total    = 0;
+    bool          capped   = false;  // the pre-cycle history was cut at MaxExtraPlies
     auto          load_ext = [&]() {
         if (total)
             return;
@@ -1906,6 +1913,7 @@ Value Position::detect_sky_cycle(int d, int ply) {
         {
             for (int i = 0; i < 256; ++i)
                 all[total++] = q[i];
+            capped = true;
             return;  // very long cycle: no pre-cycle information
         }
         for (int i = 0; i < d; ++i)
@@ -1921,6 +1929,7 @@ Value Position::detect_sky_cycle(int d, int ply) {
             cached &= sky_cached(p);
             ++m;
         }
+        capped = m == MaxExtraPlies;
         if (!cached)
         {
             Position scratch;
@@ -1937,6 +1946,24 @@ Value Position::detect_sky_cycle(int d, int ply) {
             oldest = i;
         return oldest;
     };
+
+    // 4. Pure chase against pure chase (长捉 vs 长捉): the side whose chase of its
+    //    common victim started first runs out of its 6 moves first and changes.
+    //    The streaks interleave, so the older start is the larger index (never
+    //    equal); only when both reach the end of a capped history is it unknown.
+    auto first_chaser = [&]() {
+        load_ext();
+        auto chasingA = [&](const StateInfo* x) { return !x->checkersBB && (x->skyVictims & A); };
+        auto chasingB = [&](const StateInfo* x) { return !x->checkersBB && (x->skyVictims & B); };
+        const int oldA = streak_oldest(0, chasingA), oldB = streak_oldest(1, chasingB);
+        if (oldA < d - 2 || oldB < d - 1)
+            return VALUE_DRAW;  // Sky info missing
+        if (capped && oldA >= total - 2 && oldB >= total - 2)
+            return VALUE_DRAW;
+        return loss_for(oldA > oldB ? AColor : BColor);
+    };
+    if (chaseOnly)
+        return first_chaser();
 
     // 1. Check/chase alternation (一将一捉) on one side.
     if (mixedA != mixedB)
@@ -2038,22 +2065,16 @@ Value Position::detect_sky_cycle(int d, int ply) {
 
     // 4. Pure chase against pure chase: the side that started chasing first changes.
     if (!anyCheck[0] && !anyCheck[1])
-    {
-        load_ext();
-        auto chasingA = [&](const StateInfo* x) { return !x->checkersBB && (x->skyVictims & A); };
-        auto chasingB = [&](const StateInfo* x) { return !x->checkersBB && (x->skyVictims & B); };
-        const int oldA = streak_oldest(0, chasingA), oldB = streak_oldest(1, chasingB);
-        const int extraA = oldA >= d ? (oldA - d) / 2 + 1 : 0;
-        const int extraB = oldB >= d ? (oldB - d - 1) / 2 + 1 : 0;
-        if (extraA != extraB)
-            return loss_for(extraA > extraB ? AColor : BColor);
-    }
+        return first_chaser();
     return VALUE_DRAW;
 }
 
 
-// Detects chases from state st - d to state st.
-Value Position::detect_chases(int d, int ply) {
+// Detects chases from state st - d to state st. For QiZheRule, *bothChase (when
+// given) is set when both sides are forbidden by chases alone (no check or kill
+// in the cycle), i.e. 长捉 vs 长捉: rule_judge() then asks detect_sky_cycle() who
+// started first.
+Value Position::detect_chases(int d, int ply, bool* bothChase) {
 
     using RR = RuleConfig::RepetitionRule;
 
@@ -2126,8 +2147,9 @@ Value Position::detect_chases(int d, int ply) {
     //       并无杀势；原已存在、非本着造成的杀势不算杀。
     if (chineseRule || qizheRule)
     {
-        bool hasIdle[COLOR_NB] = {false, false};
-        u16  victims[COLOR_NB] = {0xFFFF, 0xFFFF};  // 本方捉着的共同被捉子
+        bool hasIdle[COLOR_NB]   = {false, false};
+        bool checkKill[COLOR_NB] = {false, false};    // a check or kill in the cycle
+        u16  victims[COLOR_NB]   = {0xFFFF, 0xFFFF};  // 本方捉着的共同被捉子
 
         for (int i = 0; i < d; ++i)
         {
@@ -2146,6 +2168,7 @@ Value Position::detect_chases(int d, int ply) {
             // played an idle move is an allowed side, nothing more to learn about it.
             if (cur->checkersBB || hasIdle[mover])
             {
+                checkKill[mover] |= bool(cur->checkersBB);
                 step_back();
                 continue;
             }
@@ -2175,7 +2198,10 @@ Value Position::detect_chases(int d, int ply) {
                 kill = false;
 
             if (kill)
+            {
+                checkKill[mover] = true;
                 continue;  // 杀（含杀兼捉）: forbidden, nothing more to record
+            }
 
             ChaseMap before = chased(mover);
             ChaseMap fresh  = after;
@@ -2194,7 +2220,11 @@ Value Position::detect_chases(int d, int ply) {
         const bool forbUs = !hasIdle[us], forbThem = !hasIdle[them];
         if (forbUs != forbThem)
             return forbUs ? mated_in(ply) : mate_in(ply);  // 25.3
-        return VALUE_DRAW;                                 // 25.2 / 26.9.4
+        // QiZheRule (实测与天天象棋相同, per-side counters): 长捉 vs 长捉 is decided by
+        // who started first, see rule_judge().
+        if (bothChase && qizheRule && forbUs && forbThem && !checkKill[us] && !checkKill[them])
+            *bothChase = true;
+        return VALUE_DRAW;  // 25.2 / 26.9.4
     }
 
     u16      rooks[COLOR_NB] = {0xFFFF, 0xFFFF};
@@ -2386,7 +2416,11 @@ bool Position::rule_judge(Value& result, int ply) {
                             Position rollback;
                             memcpy((void*) &rollback, (const void*) this, offsetof(Position, filter));
                             memcpy((void*) rollback.idBoard, (const void*) idBoard, sizeof(idBoard));
-                            result = rollback.detect_chases(i, ply);
+                            bool bothChase = false;
+                            result         = rollback.detect_chases(i, ply, &bothChase);
+                            // QiZheRule 长捉 vs 长捉: the side that started first changes.
+                            if (bothChase)
+                                result = detect_sky_cycle(i, ply, true);
                         }
                     }
                     else

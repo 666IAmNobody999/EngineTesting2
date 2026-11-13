@@ -320,9 +320,9 @@ class Position {
     void move_piece(Square from, Square to, DirtyThreats* const dts = nullptr);
     std::pair<Piece, int> do_move(Move m);
     void                  undo_move(Move m, Piece captured, int id = 0);
-    Value                 detect_chases(int d, int ply = 0);
+    Value                 detect_chases(int d, int ply = 0, bool* bothChase = nullptr);
     void                  set_sky_info(int d);
-    Value                 detect_sky_cycle(int d, int ply = 0);
+    Value                 detect_sky_cycle(int d, int ply = 0, bool chaseOnly = false);
     // The extra bitboard b masks out checkers that should be ignored (e.g. the
     // pre-existing checkers on our own king), so that we only flag moves that
     // create NEW attacks on the king. Shared by all chasing detectors.
