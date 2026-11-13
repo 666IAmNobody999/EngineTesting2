@@ -145,6 +145,7 @@ class Engine {
     // Automatic Search Algorithm: what is known about the current game.
     TimePoint gameBaseTime = 0;      // largest remaining time seen (base time)
     bool      gamePonder   = false;  // a go ponder was received in this game
+    bool      sixtyFastGame = false;  // 0-1 s per move, 1 min + 0 game or analysis
     int       gameLastPly  = -1;
 };
 

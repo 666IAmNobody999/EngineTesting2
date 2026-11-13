@@ -146,9 +146,14 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     options.add(  //
       "Avoid_Repetition", Option(true));
 
-    // Avoid_Sixty_Move_Draw: HumanLike / HumanLikeBareKing only. When materially
-    // ahead and the natural-move limit is a few plies away, only captures (or,
-    // without any, moves that offer the opponent a capture) are searched.
+    // Avoid_Sixty_Move_Draw: when materially ahead and the natural-move limit is
+    // a few plies away, only captures (or, without any, moves that offer the
+    // opponent a capture) are searched. When true it applies to
+    //  * HumanLike / HumanLikeBareKing: always (any time control, pondering or not);
+    //  * BestMove / BareKing: only at 0-1 s per move, a 1 minute game without
+    //    increment, or in analysis;
+    //  * Forced Draw: never.
+    // When false it never applies.
     options.add(  //
       "Avoid_Sixty_Move_Draw", Option(true));
 
@@ -341,6 +346,7 @@ void Engine::choose_search_algorithm(Search::LimitsType& limits) {
     {
         limits.algo       = SearchAlgorithm::IMPROVED_MULTIPV3;
         limits.algoReason = nullptr;
+        sixtyFastGame     = false;
         return;
     }
 
@@ -368,6 +374,13 @@ void Engine::choose_search_algorithm(Search::LimitsType& limits) {
                            && limits.time[us] <= FastMoveTime + limits.inc[us]);
     const bool ponder = bool(options["Ponder"]) || limits.ponderMode || gamePonder;
 
+    // Avoid_Sixty_Move_Draw for BestMove / BareKing: 0-1 s per move, a 1 minute
+    // game without increment (sudden death), or analysis.
+    constexpr TimePoint OneMinuteBase = 60 * 1000;
+    const bool oneMinute = limits.use_time_management() && limits.time[us] > 0 && !limits.movestogo
+                        && limits.inc[us] == 0 && gameBaseTime <= OneMinuteBase;
+    sixtyFastGame = analysis || fastMove || oneMinute;
+
     if (analysis)
         limits.algo = SearchAlgorithm::IMPROVED_MULTIPV3, limits.algoReason = "Analysis";
     else if (blitz)
@@ -391,7 +404,7 @@ void Engine::new_game() {
     search_clear();
 }
 
-// Avoid_Sixty_Move_Draw (HumanLike / HumanLikeBareKing): with more material than
+// Avoid_Sixty_Move_Draw (see the option for the modes it applies to): with more material than
 // the opponent and at most SixtyWindow plies left before the natural-move draw,
 // restrict the root to captures; without a capture, to moves after which the
 // opponent can capture a piece (giving material away resets the counter too),
@@ -402,8 +415,14 @@ void Engine::new_game() {
 void Engine::avoid_sixty_move_draw(Search::LimitsType& limits) {
     constexpr int SixtyWindow = 6;
 
-    if (!limits.searchmoves.empty() || limits.forceImproved || !options["Avoid_Sixty_Move_Draw"]
-        || !Search::Attack::human_like(Search::Attack::parse(options)))
+    if (!limits.searchmoves.empty() || limits.forceImproved || !options["Avoid_Sixty_Move_Draw"])
+        return;
+
+    // HumanLike / HumanLikeBareKing: always. BestMove / BareKing: only in a fast
+    // game or analysis (sixtyFastGame). Forced Draw: never.
+    const auto mode = Search::Attack::parse(options);
+    if (mode == Search::AttackMode::FORCED_DRAW
+        || (!Search::Attack::human_like(mode) && !sixtyFastGame))
         return;
 
     const int left = RuleConfig::rule60Limit - pos.rule60_count();
