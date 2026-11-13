@@ -508,11 +508,9 @@ BOOL WINAPI console_handler(DWORD type) {
 void apply_process_tuning() {
     HANDLE proc = GetCurrentProcess();
 
-    // 1. CPU priority: at least Normal (特調測試版: not raised to High). Only a
-    //    priority below Normal (Idle / Below normal) is lifted back to Normal.
-    const DWORD pc = GetPriorityClass(proc);
-    if (pc == IDLE_PRIORITY_CLASS || pc == BELOW_NORMAL_PRIORITY_CLASS)
-        SetPriorityClass(proc, NORMAL_PRIORITY_CLASS);
+    // 1. CPU priority: High.
+    if (GetPriorityClass(proc) != HIGH_PRIORITY_CLASS)
+        SetPriorityClass(proc, HIGH_PRIORITY_CLASS);
 
     // 2. Dynamic thread priority boost on (FALSE = boost not disabled).
     BOOL boostDisabled = FALSE;
@@ -708,9 +706,10 @@ void idle_other_pikafish() {
         // this engine and its own watchers) are left alone.
         if (same_user(token_user(h), selfUser) && image_path(h) != selfPath)
         {
-            // I/O priority and memory priority "Very low", EcoQoS (power
-            // throttling on) and no dynamic priority boost. 特調測試版: the CPU
-            // priority is left as it is (neither raised nor lowered).
+            // CPU priority "Idle", I/O priority and memory priority "Very low",
+            // EcoQoS (power throttling on) and no dynamic priority boost.
+            if (GetPriorityClass(h) != IDLE_PRIORITY_CLASS)
+                SetPriorityClass(h, IDLE_PRIORITY_CLASS);
             BOOL boostDisabled = FALSE;
             if (GetProcessPriorityBoost(h, &boostDisabled) && !boostDisabled)
                 SetProcessPriorityBoost(h, TRUE);
