@@ -1,13 +1,11 @@
 /*
-  幻神引擎 授权状态守卫与多点低频暗桩 (v5 防逆向隐形加固版, 不含 windows.h)
+  幻神引擎 授权状态守卫与多点低频暗桩 (v6 防反组译花指令 + 隐形加固版, 不含 windows.h)
 
   核心防御机制:
   1. 彻底废除固定常数 grant: grant(seed, crypto_zero_proof, hwid_zero_proof)
      必须同时满足 Ed25519 椭圆曲线点差值 == 0 且 HWID 差值 == 0, 才能算出正确的 Token 对。
-     即使破解者用 90 90 (NOP) 或 mov eax, 1; ret 跳过外层判断, 只要没有正版授权码,
-     Token 必定处于未解锁或被毒化状态, 后续 4 处低频暗桩将 100% 触发!
-  2. 全链路强制内联 (HS_ALWAYS_INLINE) + 编译期字符串动态 XOR 加密 (HS_STR / HS_WSTR):
-     消除独立函数入口与明文字符串交叉引用 (Xrefs), 让反编译工具无法定位验证函数。
+  2. x86-64 反组译花指令 (HS_ANTI_DISASM): 利用 clc + jnc 恒成立跳转夹带残缺多字节指令头,
+     真实 CPU 零周期跳过, 但 IDA Pro / Ghidra 线性与递归扫描会发生指令错位, 按 F5 直接报错!
   3. 零热路径开销: 绝不在 search() / qsearch() / evaluate() / movegen() 内部调用,
      100% 不影响 NPS (K值)、上层速度与棋力。
 */
@@ -27,6 +25,26 @@
     #define HS_ALWAYS_INLINE __forceinline
 #else
     #define HS_ALWAYS_INLINE inline
+#endif
+
+// x86-64 反组译与反 F5 花指令:
+// CPU 执行 clc (清进位标志) 后 jnc 1f 100% 跳转至标签 1, 耗时为 0;
+// 反组译器则会解析夹在中间的残缺 opcode (0xE8 call / 0x48 0x81 sub / 0xFF 0x25 jmp),
+// 导致后续真实指令解码错位, 破坏 IDA Pro F5 伪代码生成。
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    #define HS_ANTI_DISASM()                                                   \
+        do {                                                                   \
+            __asm__ __volatile__(                                              \
+              "clc\n\t"                                                        \
+              "jnc 1f\n\t"                                                     \
+              ".byte 0xE8, 0x48, 0x81, 0xE9, 0xFF, 0x25, 0x0F, 0x0B\n\t"       \
+              "1:\n\t"                                                         \
+              :                                                                \
+              :                                                                \
+              : "cc");                                                         \
+        } while (0)
+#else
+    #define HS_ANTI_DISASM() ((void) 0)
 #endif
 
 namespace HuanShen {
@@ -124,6 +142,7 @@ HS_ALWAYS_INLINE std::uint64_t scramble2(std::uint64_t z) {
 HS_ALWAYS_INLINE void grant(std::uint64_t seed,
                             std::uint64_t crypto_zero_proof = 0,
                             std::uint64_t hwid_zero_proof   = 0) {
+    HS_ANTI_DISASM();
     volatile std::uint64_t cp = crypto_zero_proof;
     volatile std::uint64_t hp = hwid_zero_proof;
     const std::uint64_t    poison =
@@ -133,6 +152,7 @@ HS_ALWAYS_INLINE void grant(std::uint64_t seed,
     tokenA.store(a, std::memory_order_relaxed);
     tokenB.store(scramble(a ^ GUARD_MIX_1) ^ poison, std::memory_order_relaxed);
 
+    HS_ANTI_DISASM();
     const std::uint64_t c = scramble2((seed ^ GUARD_MIX_2) | 3ULL);
     tokenC.store(c, std::memory_order_relaxed);
     tokenD.store(scramble2(c ^ GUARD_MIX_3) ^ poison, std::memory_order_relaxed);
@@ -144,6 +164,7 @@ HS_ALWAYS_INLINE void grant(std::uint64_t seed,
 
 // 撤销授权时重置所有守卫 Token
 HS_ALWAYS_INLINE void revoke() {
+    HS_ANTI_DISASM();
     tokenA.store(0, std::memory_order_relaxed);
     tokenB.store(0x5BD1E9955BD1E995ULL, std::memory_order_relaxed);
     tokenC.store(0x1F83D9ABFB41BD6BULL, std::memory_order_relaxed);

@@ -206,16 +206,6 @@ void UCIEngine::loop() {
             engine.trace_eval();
         else if (token == "compiler")
             sync_cout << compiler_info() << sync_endl;
-        else if (token == "export_net")
-        {
-            std::optional<std::filesystem::path> file;
-            std::string                          filename;
-
-            if (is >> filename)
-                file = path_from_utf8(filename);
-
-            engine.save_network(file);
-        }
         else if (token == "--help" || token == "help" || token == "--license" || token == "license")
             sync_cout
               << to_output_codepage("\n幻神引擎 (based on Pikafish) is a powerful xiangqi engine for playing and analyzing."

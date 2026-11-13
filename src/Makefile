@@ -732,7 +732,7 @@ endif
 ### 3.3 Optimization
 ifeq ($(optimize),yes)
 
-	CXXFLAGS += -O3 -funroll-loops
+	CXXFLAGS += -O3 -funroll-loops -fno-asynchronous-unwind-tables -fno-unwind-tables
 
 	ifeq ($(comp),gcc)
 		ifeq ($(OS), Android)
@@ -1202,7 +1202,7 @@ else
 endif
 
 strip:
-	$(STRIP) $(EXE)
+	$(STRIP) --strip-all $(EXE)
 
 install:
 	-mkdir -p -m 755 $(BINDIR)

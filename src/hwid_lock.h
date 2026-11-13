@@ -459,21 +459,53 @@ HS_ALWAYS_INLINE void store_last_seen_date(uint64_t hwid, uint32_t date) {
 #endif
 }
 
-HS_ALWAYS_INLINE bool debugger_attached() {
+// 隐形反调试 + 硬件断点 (DR0-DR3) 探测:
+// 返回 0 代表环境干净; 返回非 0 乱数代表检测到调试器或硬件断点, 将直接混入暗桩毒化因子!
+HS_ALWAYS_INLINE std::uint64_t stealth_debug_anomaly() {
+    HS_ANTI_DISASM();
+    std::uint64_t anomaly = 0;
 #if defined(_WIN32) && !defined(HS_NO_ANTIDEBUG)
-    if (IsDebuggerPresent())
-        return true;
+    #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    // 1. 直接透过 GS:[0x60] 读取 PEB, 绕过 API Hook 检查 BeingDebugged (+0x02) 与 NtGlobalFlag (+0xBC)
+    const std::uint8_t* peb = nullptr;
+    __asm__ __volatile__("movq %%gs:0x60, %0" : "=r"(peb));
+    if (peb)
+    {
+        if (peb[2] != 0)
+            anomaly |= 0x71A3'9C01ULL;
+        std::uint32_t ntGlobalFlag = 0;
+        std::memcpy(&ntGlobalFlag, peb + 0xBC, sizeof(ntGlobalFlag));
+        if ((ntGlobalFlag & 0x70u) != 0)
+            anomaly |= 0x84B2'E502ULL;
+    }
+    #endif
+
+    // 2. 检查当前线程是否被下了硬件断点 (DR0 ~ DR3)
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (GetThreadContext(GetCurrentThread(), &ctx))
+    {
+        if (ctx.Dr0 || ctx.Dr1 || ctx.Dr2 || ctx.Dr3)
+            anomaly |= (ctx.Dr0 ^ ctx.Dr1 ^ ctx.Dr2 ^ ctx.Dr3 ^ 0xDEAD'7788ULL);
+    }
+
+    // 3. 远端调试器检查
     BOOL remote = FALSE;
     if (CheckRemoteDebuggerPresent(GetCurrentProcess(), &remote) && remote)
-        return true;
+        anomaly |= 0x55AA'CC33ULL;
 #endif
-    return false;
+    return anomaly;
 }
 
-// 强制内联 + 全字串混淆: 二进制中不再存在独立的 verify_license_key 函数入口与明文错误提示
+HS_ALWAYS_INLINE bool debugger_attached() {
+    return stealth_debug_anomaly() != 0;
+}
+
+// 强制内联 + 花指令 + 全字串混淆: 二进制中不再存在独立的 verify_license_key 函数入口与明文错误提示
 HS_ALWAYS_INLINE bool verify_license_key(const std::string& raw_key,
                                          std::string*       status_msg = nullptr) {
     using namespace HuanShen;
+    HS_ANTI_DISASM();
 
     auto fail = [&](const std::string& why) {
         if (status_msg)
@@ -489,12 +521,14 @@ HS_ALWAYS_INLINE bool verify_license_key(const std::string& raw_key,
         return fail(HS_STR("授权码格式错误!"));
     }
 
-    if (debugger_attached())
+    const std::uint64_t dbg_poison = stealth_debug_anomaly();
+    if (dbg_poison != 0)
         return fail(HS_STR("检测到调试器, 授权验证已拒绝!"));
 
     uint8_t pk[32];
     load_public_key(pk);
 
+    HS_ANTI_DISASM();
     License::Info info;
     std::uint64_t crypto_proof = 0xDEAD'BEEF'CAFE'BABEULL;
     if (!License::verify_blob(blob, pk, info, &crypto_proof))
@@ -529,8 +563,9 @@ HS_ALWAYS_INLINE bool verify_license_key(const std::string& raw_key,
     else if (status_msg)
         *status_msg = HS_STR("已授权 (永久绑定本机, 序号: ") + std::to_string(info.serial) + ")";
 
+    // 将 Ed25519 差值、调试器/硬件断点毒化值与 HWID 差值一并传入暗桩守卫
     volatile uint64_t sig_part = License::get_u64(blob.data() + License::PAYLOAD_BYTES);
-    LicenseGuard::grant(mix64(hwid ^ sig_part), crypto_proof, hwid_diff);
+    LicenseGuard::grant(mix64(hwid ^ sig_part), crypto_proof ^ dbg_poison, hwid_diff);
     return true;
 }
 
