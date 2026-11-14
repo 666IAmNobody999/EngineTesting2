@@ -182,6 +182,13 @@ struct StateInfo {
 
     // Helper used only to keep our stable idBoard synchronized on full undo.
     int        skyCapturedId;
+
+    // SkyRule / QiZheRule: consecutive non-capturing checks of the side that made
+    // this move (0 when this move is not one), maintained by do_move(), and the
+    // mover's consecutive moves that may be offensive (check, chase or kill; a cheap
+    // superset filled by rule_judge(), exact for the game history).
+    u8         skyCheckRun;
+    u8         skyMaybeRun;
 };
 
 
@@ -295,6 +302,7 @@ class Position {
     int   sky_counter_history(struct SkyMoveRecord* hist);
     bool  sky_counter_forbidden(Move m, const struct SkyMoveRecord* hist, int own);
     int   sky_records(struct SkyMoveRecord* out, int maxPlies, int killParity = -1);
+    void  publish_sky_history();
     Value major_material(Color c) const;
     Value major_material() const;
 
@@ -320,9 +328,12 @@ class Position {
     void move_piece(Square from, Square to, DirtyThreats* const dts = nullptr);
     std::pair<Piece, int> do_move(Move m);
     void                  undo_move(Move m, Piece captured, int id = 0);
-    Value                 detect_chases(int d, int ply = 0, bool* bothChase = nullptr);
+    Value                 detect_chases(int d, int ply = 0, bool* bothChase = nullptr, bool* bothForbidden = nullptr);
     void                  set_sky_info(int d);
-    Value                 detect_sky_cycle(int d, int ply = 0, bool chaseOnly = false);
+    Value                 detect_sky_cycle(int d, int ply = 0);
+    bool                  sky_chase_exceeded();
+    [[gnu::noinline]] bool sky_chase_verify(int run);
+    Value                 sky_first_exceeder(int d, int ply);
     // The extra bitboard b masks out checkers that should be ignored (e.g. the
     // pre-existing checkers on our own king), so that we only flag moves that
     // create NEW attacks on the king. Shared by all chasing detectors.
