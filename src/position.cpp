@@ -49,10 +49,10 @@ namespace Stockfish {
 using namespace Attacks;
 
 namespace RuleConfig {
-// Defaults: SkyRule with rule120, Sixty Move Rule on.
+// Defaults: AsianRule with rule120, Sixty Move Rule on.
 // AsianRule/SkyRule/ChineseRule/YiTianRule all couple to rule120 and keep the
 // Sixty Move Rule on (enforced in engine.cpp couplings).
-RepetitionRule repetitionRule  = RepetitionRule::SKY;
+RepetitionRule repetitionRule  = RepetitionRule::ASIAN;
 DrawRule       drawRule        = DrawRule::NONE;
 int            mateThreatDepth = 1;
 bool           sixtyMoveRule   = true;
