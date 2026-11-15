@@ -159,7 +159,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
 
     options.add(  //
       "Repetition Rule",
-      Option("AsianRule var SkyRule var AsianRule var QiZheRule var YiTianRule var ChineseRule var ComputerRule",
+      Option("AsianRule var AsianRule var SkyRule var QiZheRule var YiTianRule var ChineseRule var ComputerRule",
              "AsianRule", [this](const Option& o) {
                  using RR = RuleConfig::RepetitionRule;
 
