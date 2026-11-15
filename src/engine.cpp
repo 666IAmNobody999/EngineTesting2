@@ -347,6 +347,7 @@ void Engine::choose_search_algorithm(Search::LimitsType& limits) {
         limits.algo       = SearchAlgorithm::IMPROVED_MULTIPV3;
         limits.algoReason = nullptr;
         sixtyFastGame     = false;
+        RuleConfig::skySearchChase = false;  // as for go depth / nodes
         return;
     }
 
@@ -380,6 +381,9 @@ void Engine::choose_search_algorithm(Search::LimitsType& limits) {
     const bool oneMinute = limits.use_time_management() && limits.time[us] > 0 && !limits.movestogo
                         && limits.inc[us] == 0 && gameBaseTime <= OneMinuteBase;
     sixtyFastGame = analysis || fastMove || oneMinute;
+    // 搜索中连捉／杀判断: analysis, or Ponder (后台思考) except 0-1 s per move and a
+    // 1 minute game without increment.
+    RuleConfig::skySearchChase = analysis || (ponder && !fastMove && !oneMinute);
 
     if (analysis)
         limits.algo = SearchAlgorithm::IMPROVED_MULTIPV3, limits.algoReason = "Analysis";

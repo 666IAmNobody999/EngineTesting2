@@ -64,6 +64,12 @@ enum class DrawRule {
 extern RepetitionRule repetitionRule;
 extern DrawRule       drawRule;
 extern int            mateThreatDepth;
+// SkyRule / QiZheRule: whether the search itself judges the chase / kill counters
+// (搜索中连捉／杀判断). Only in analysis, or with Ponder (后台思考) when the game is
+// neither 0-1 s per move nor a 1 minute game without increment; otherwise chases
+// are judged by the root counters and the repetition cycles only. Set per search
+// by Engine::choose_search_algorithm(). Consecutive checks are always counted.
+extern bool           skySearchChase;
 extern bool           sixtyMoveRule;
 extern int            rule60MaxPly;
 
@@ -135,7 +141,7 @@ struct SkyMoveRecord {
     bool check;
     bool capture;
     bool evasion;  // the mover was in check before the move
-    bool kill;     // QiZheRule only: a non-checking move that makes a kill (杀)
+    bool kill;     // QiZheRule only: a non-checking move that makes a kill (一步杀)
 };
 
 // Records needed by the root counters: the longest counter (18 own moves) + this move.
@@ -295,8 +301,8 @@ class Position {
     // chasing the SAME victim across the repetition cycle. This is the core of
     // the "常捉无根子" detector shared by AsianRule, SkyRule and YiTianRule.
     ChaseMap chased(Color c);
-    bool  has_mate_threat(Depth d = -1);
-    bool  mate_threat_without(Square s) const;
+    bool  has_mate_threat(Depth d = -1, int maxDepth = RuleConfig::mateThreatDepth);
+    bool  mate_threat_without(Square s, int maxDepth = RuleConfig::mateThreatDepth) const;
     // SkyRule 计数器 (天天象棋): whether playing m here exceeds one of the mover's
     // per-side check / chase / alternation counters. Used only to filter root moves.
     int   sky_counter_history(struct SkyMoveRecord* hist);
@@ -328,12 +334,11 @@ class Position {
     void move_piece(Square from, Square to, DirtyThreats* const dts = nullptr);
     std::pair<Piece, int> do_move(Move m);
     void                  undo_move(Move m, Piece captured, int id = 0);
-    Value                 detect_chases(int d, int ply = 0, bool* bothChase = nullptr, bool* bothForbidden = nullptr);
+    Value                 detect_chases(int d, int ply = 0);
     void                  set_sky_info(int d);
     Value                 detect_sky_cycle(int d, int ply = 0);
     bool                  sky_chase_exceeded();
     [[gnu::noinline]] bool sky_chase_verify(int run);
-    Value                 sky_first_exceeder(int d, int ply);
     // The extra bitboard b masks out checkers that should be ignored (e.g. the
     // pre-existing checkers on our own king), so that we only flag moves that
     // create NEW attacks on the king. Shared by all chasing detectors.

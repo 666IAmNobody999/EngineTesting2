@@ -342,8 +342,9 @@ void ThreadPool::start_thinking(Position& pos, StateListPtr& states, Search::Lim
     // per search here, so the search itself is not slowed down.
     // The Sky info of the game history is filled in first, so that the search can
     // continue counting a chase that started before the root.
-    if (RuleConfig::repetitionRule == RuleConfig::RepetitionRule::SKY
-        || RuleConfig::repetitionRule == RuleConfig::RepetitionRule::QIZHE)
+    if (RuleConfig::skySearchChase
+        && (RuleConfig::repetitionRule == RuleConfig::RepetitionRule::SKY
+            || RuleConfig::repetitionRule == RuleConfig::RepetitionRule::QIZHE))
         pos.publish_sky_history();
 
     if ((RuleConfig::repetitionRule == RuleConfig::RepetitionRule::SKY
