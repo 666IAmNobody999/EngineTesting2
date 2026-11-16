@@ -44,21 +44,11 @@
 #include "types.h"
 #include "uci.h"
 #include "ucioption.h"
-#include "winperf.h"
 #include "hwid_lock.h"
 
 namespace Stockfish {
 
 namespace {
-
-// Windows process tuning (CPU priority "High", I/O priority "High",
-// memory priority "Normal", dynamic thread priority boost on); see winperf.h.
-// GUIs usually create the engine with their own priority setting, and some of
-// them re-apply it later, so this is called both at start-up and before every
-// search; the last writer wins and the engine makes sure it is the last one.
-// On non-Windows platforms raising priority needs elevated rights, so it is a
-// no-op there.
-void force_process_priority() { WinPerf::apply_process_tuning(); }
 
 // NumaPolicy is a combo option; map its (case-insensitive) value to the exact
 // lower-case name used by the NUMA code. Anything unexpected falls back to auto.
@@ -298,9 +288,6 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     RuleConfig::rule60MaxPly       = int(options["Rule60MaxPly"]);
     RuleConfig::refresh_rule60();
 
-    force_process_priority();
-    idle_other_pikafish();
-
     threads.clear();
     threads.ensure_network_replicated();
     resize_threads();
@@ -315,7 +302,6 @@ std::variant<u64, PositionSetError> Engine::perft(const std::string& fen, Depth 
 void Engine::go(Search::LimitsType& limits) {
     assert(limits.perft == 0);
     verify_network();
-    force_process_priority();  // re-assert in case the GUI changed it after launch
 
     std::string auth_msg;
     if (!HWIDLock::is_authorized(std::string(options["License Key"]), &auth_msg))
@@ -496,19 +482,8 @@ void Engine::avoid_sixty_move_draw(Search::LimitsType& limits) {
 
 void Engine::stop() { threads.stop = true; }
 
-// Windows: other processes whose name contains "pikafish", "pika", "fish",
-// "cyclone" or "bugchess" (same user, not this executable) get CPU priority
-// "Idle", I/O / memory priority "Very low" and EcoQoS; xiangqi GUIs (visible
-// window, name with "chess", "象棋", "ethinker", "pengfei" ...) get "High".
-// Called at start-up, isready and ucinewgame.
-void Engine::idle_other_pikafish() const {
-    WinPerf::idle_other_pikafish();
-    WinPerf::boost_chess_guis();
-}
-
 void Engine::search_clear() {
     wait_for_search_finished();
-    idle_other_pikafish();
 
     tt.clear(threads);
     threads.clear();
@@ -740,15 +715,6 @@ std::string Engine::thread_allocation_information_as_string() const {
 
     usize threadsSize = threads.size();
     ss << "Using " << threadsSize << (threadsSize > 1 ? " threads" : " thread");
-
-    const auto& pins = threads.get_core_pins();
-    if (!pins.empty())
-    {
-        ss << " preferring physical cores (logical processors ";
-        for (usize i = 0; i < pins.size(); ++i)
-            ss << (i ? "," : "") << pins[i];
-        ss << ")";
-    }
 
     auto boundThreadsByNodeStr = thread_binding_information_as_string();
     if (boundThreadsByNodeStr.empty())

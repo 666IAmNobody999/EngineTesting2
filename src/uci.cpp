@@ -181,10 +181,7 @@ void UCIEngine::loop() {
         else if (token == "ucinewgame" || token == "uccinewgame")
             engine.new_game();
         else if (token == "isready")
-        {
-            engine.idle_other_pikafish();
             sync_cout << "readyok" << sync_endl;
-        }
 
         // Add custom non-UCI commands, mainly for debugging purposes.
         else if (token == "flip")

@@ -25,7 +25,6 @@
 #include "position.h"
 #include "tune.h"
 #include "uci.h"
-#include "winperf.h"
 #include "hwid_lock.h"
 
 using namespace Stockfish;
@@ -39,15 +38,6 @@ __attribute__((used))  // keep main alive
 #endif
 
 int main(int argc, char* argv[]) {
-    // Windows: a helper started by acquire_power_plan() only waits for its engine
-    // to exit and then restores the previous power plan.
-    if (WinPerf::run_power_watcher(argc, argv))
-        return 0;
-
-    // Windows: the elevated helper that grants "Lock pages in memory" (Large Pages).
-    if (WinPerf::run_lock_pages_helper(argc, argv))
-        return 0;
-
     // Switch Windows console to UTF-8 BEFORE printing any Chinese text to prevent garbled characters
     set_console_utf8();
 
@@ -66,12 +56,6 @@ int main(int argc, char* argv[]) {
             std::cout << to_output_codepage(HS_STR("info string [授权状态] ") + auth_msg) << std::endl;
     }
 
-    // Windows: "幻神终极效能" power plan while the engine runs.
-    WinPerf::acquire_power_plan();
-
-    // Windows: make sure Large Pages can be used ("Lock pages in memory").
-    WinPerf::ensure_lock_pages_right();
-
     Attacks::init();
     Position::init();
 
@@ -82,7 +66,6 @@ int main(int argc, char* argv[]) {
 
     uci->loop();
 
-    WinPerf::release_power_plan();
     return 0;
 }
 
