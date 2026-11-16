@@ -155,7 +155,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     //  * Forced Draw: never.
     // When false it never applies.
     options.add(  //
-      "Avoid_Sixty_Move_Draw", Option(true));
+      "Avoid_Sixty_Move_Draw", Option(false));
 
     options.add(  //
       "Repetition Rule",
