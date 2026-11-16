@@ -142,6 +142,7 @@ struct SkyMoveRecord {
     bool capture;
     bool evasion;  // the mover was in check before the move
     bool kill;     // QiZheRule only: a non-checking move that makes a kill (一步杀)
+    bool reset;    // the opponent's move before it was a capture (连将重新计算)
 };
 
 // Records needed by the root counters: the longest counter (18 own moves) + this move.
@@ -339,6 +340,7 @@ class Position {
     Value                 detect_sky_cycle(int d, int ply = 0);
     bool                  sky_chase_exceeded();
     [[gnu::noinline]] bool sky_chase_verify(int run);
+    [[gnu::noinline]] bool sky_check_exceeded() const;
     // The extra bitboard b masks out checkers that should be ignored (e.g. the
     // pre-existing checkers on our own king), so that we only flag moves that
     // create NEW attacks on the king. Shared by all chasing detectors.

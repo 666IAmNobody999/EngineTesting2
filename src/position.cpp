@@ -22,6 +22,7 @@
 #include <array>
 #include <cassert>
 #include <cctype>
+#include <climits>
 #include <cstddef>
 #include <initializer_list>
 #include <cstring>
@@ -765,10 +766,13 @@ void Position::do_move(Move                      m,
     st->checkersBB = givesCheck ? checkers_to(us, king_square(them)) : Bitboard(0);
     assert(givesCheck == bool(checkers_to(us, king_square(them))));
 
-    // 天天象棋 / 棋者象棋 连续将军 counter of the mover (a capture clears it).
+    // 天天象棋 / 棋者象棋 连续将军 counter of the mover (a capture by either side
+    // clears it).
     const StateInfo* ownPrev = st->previous->previous;
     st->skyCheckRun          = givesCheck && !captured
-                               ? u8(std::min(ownPrev ? ownPrev->skyCheckRun + 1 : 1, 255))
+                               ? u8(ownPrev && st->previous->capturedPiece == NO_PIECE
+                                      ? std::min(ownPrev->skyCheckRun + 1, 255)
+                                      : 1)
                                : 0;
     st->skyMaybeRun = 0;
 
@@ -1574,6 +1578,7 @@ int Position::sky_records(SkyMoveRecord* out, int maxPlies, int killParity) {
         r.check   = bool(cur->checkersBB);
         r.capture = cur->capturedPiece != NO_PIECE;
         r.evasion = bool(cur->previous->checkersBB);
+        r.reset   = cur->previous->capturedPiece != NO_PIECE;
 
         if (r.check)
         {
@@ -1621,17 +1626,19 @@ namespace {
 // whether the last move exceeds one of them:
 //   长捉一子 6 回合（第 7 次捉强制变招）；分捉另一子时清空前一子被捉次数；应将产生的捉
 //   算捉，被捉次数保留但不增加；将捉同时出现优先算将，清空之前的被捉次数。
-//   连续将军：一子或多子造成的连续将军合共最多 6 次（第 7 次强制变招，棋例 26 / 28）。
+//   连续将军：每子最多 6 次（单子 6、两子 12、三子或以上 18 回合；双将两子各计一次；
+//   第 7 次由同一子将军强制变招，棋例 13 / 26）。
 //   将捉交替：单子 12 回合，一子以上 18 回合。
-//   吃子后清空所有将和捉次数，当前次数为零。
+//   吃子后清空所有将和捉次数，当前次数为零（连将：将军过程中任何一方吃子后重新计算）。
 // QiZheRule（棋者象棋，实测与天天象棋相同）另计「杀」（一步杀；将军优先于杀，杀优先于
-//   捉）。杀按捉对方将帅计：长杀 6 回合；杀与捉互相清空次数；应将产生的杀保留但不增加。
-//   一将一杀、一捉一杀与一将一捉同样计入交替：单子 12 回合，一子以上 18 回合。
+//   捉）：单子长杀、多子长杀、一捉一杀、一将一杀交替，都是第 7 次杀强制变招（杀的次数
+//   只在吃子或闲着时清空；应将产生的杀保留但不增加）。杀会清空捉次数和连将，不计入
+//   一将一捉的交替。
 struct SkyCounters {
-    u8   chaseCnt[16] = {};
+    u8   chaseCnt[16] = {}, checkCnt[16] = {};
     int  checkRun = 0, killCnt = 0, alt = 0;
     u16  altIds   = 0;
-    bool altCheck = false, altChase = false, altKill = false;
+    bool altCheck = false, altChase = false;
 
     void reset_all() { *this = SkyCounters{}; }
 
@@ -1643,11 +1650,18 @@ struct SkyCounters {
             reset_all();
             return false;
         }
+        if (r.reset)  // 将军过程中任何一方吃子后重新计算
+        {
+            std::memset(checkCnt, 0, sizeof(checkCnt));
+            checkRun = 0;
+        }
         if (r.check)
         {
             std::memset(chaseCnt, 0, sizeof(chaseCnt));
-            killCnt = 0;
-            exceeded |= ++checkRun > 6;
+            for (int id = 0; id < 16; ++id)
+                if (r.checkers >> id & 1)
+                    exceeded |= ++checkCnt[id] > 6;
+            exceeded |= ++checkRun > 18;
             ++alt;
             altIds |= r.checkers;
             altCheck = true;
@@ -1655,17 +1669,16 @@ struct SkyCounters {
         else if (r.kill)
         {
             checkRun = 0;
+            std::memset(checkCnt, 0, sizeof(checkCnt));
             std::memset(chaseCnt, 0, sizeof(chaseCnt));
             if (!r.evasion)
                 exceeded |= ++killCnt > 6;
-            ++alt;
-            altIds |= r.chasers;
-            altKill = true;
+            return exceeded;
         }
         else if (r.victims)
         {
             checkRun = 0;
-            killCnt  = 0;
+            std::memset(checkCnt, 0, sizeof(checkCnt));
             // A chase that still attacks one of the pieces chased before continues
             // that count (also for the newly chased pieces, 棋例 32 炮２退１ 起长捉).
             u8 carry = 0;
@@ -1686,7 +1699,7 @@ struct SkyCounters {
             return false;
         }
 
-        if (int(altCheck) + int(altChase) + int(altKill) >= 2
+        if (altCheck && altChase
             && alt > ((altIds & u16(altIds - 1)) ? 18 : 12))
             exceeded = true;
         return exceeded;
@@ -1904,12 +1917,50 @@ bool Position::sky_chase_verify(int run) {
         SkyMoveRecord    r{};
         r.check    = bool(p->checkersBB);
         r.evasion  = bool(p->previous->checkersBB);
+        r.reset    = p->previous->capturedPiece != NO_PIECE;
         r.checkers = r.check ? p->skyCheckers : 0;
         r.victims  = r.check ? p->skyChasers : p->skyVictims;
         r.chasers  = r.check ? 0 : p->skyChasers;
         exceeded   = c.step(r);
     }
     return exceeded;
+}
+
+
+// 连续将军 (more than 6 consecutive checks by the mover): whether one piece has given
+// more than 6 of them (a double check counts for both pieces) or there are more than
+// 18. The checkers' identities are followed back through the moves on a copy of the
+// identity board; only called for runs of 7 or more.
+bool Position::sky_check_exceeded() const {
+
+    const int run = st->skyCheckRun;
+    if (run > 18)
+        return true;
+
+    int id[SQUARE_NB];
+    std::memcpy(id, idBoard, sizeof(id));
+    u8 cnt[16] = {};
+
+    const StateInfo* p = st;
+    for (int k = 0; k < run; ++k)
+    {
+        Bitboard b = p->checkersBB;
+        while (b)
+            if (++cnt[id[pop_lsb(b)] & 15] > 6)
+                return true;
+        if (k + 1 == run)
+            break;
+        for (int j = 0; j < 2; ++j)
+        {
+            const Move m = p->move;
+            if (!m.is_ok() || !p->previous)
+                return false;
+            id[m.from_sq()] = id[m.to_sq()];
+            id[m.to_sq()]   = p->capturedPiece != NO_PIECE ? p->skyCapturedId : 0;
+            p               = p->previous;
+        }
+    }
+    return false;
 }
 
 
@@ -2006,8 +2057,9 @@ void Position::set_sky_info(int d) {
 //   4. Both sides only chase (长捉 vs 长捉), each keeping a common victim: both
 //      chase counters (6 moves) run down, so the side that started its chase
 //      first exceeds first and changes. Draw only when that cannot be told.
-// QiZheRule (棋者象棋) uses it unchanged, with 杀 (一步杀) as a chase of the king:
-// 长杀 is judged like 长捉, 一将一杀 / 一捉一杀 like 一将一捉.
+// QiZheRule (棋者象棋) uses it with 杀 (一步杀) stored as a chase of the king; a side
+// whose whole cycle is offensive with at least one kill (长杀、一将一杀、一捉一杀) is
+// judged first, see below.
 // Pure perpetual check on one or both sides is handled by rule_judge() before
 // this function is called ("一方长将，一方长捉，长将方禁招").
 Value Position::detect_sky_cycle(int d, int ply) {
@@ -2190,6 +2242,49 @@ Value Position::detect_sky_cycle(int d, int ply) {
             return VALUE_DRAW;
         return loss_for(oldA > oldB ? AColor : BColor);
     };
+
+    // QiZheRule 杀: 长杀、一捉一杀、一将一杀 may kill 6 times (the 7th kill must
+    // change), which outlasts 长捉 (6 chases) and 一将一捉 (12 / 18 moves):
+    //   杀 vs 长捉 / 一将一捉: the chasing side changes; 杀 vs anything else (idle,
+    //   split chases, ...): the killing side changes; 杀 vs 杀: the side that reaches
+    //   its 7th kill first (counting the kills before the cycle) changes.
+    // 长将 vs 杀 is judged by rule_judge() (长将方负).
+    if (anyKill[0] || anyKill[1])
+    {
+        const bool killFam[2] = {allOffend[0] && anyKill[0], allOffend[1] && anyKill[1]};
+        auto       counted    = [](const StateInfo* x) {
+            return !x->checkersBB && x->skyCheckers && !x->previous->checkersBB;
+        };
+        if (killFam[0] && killFam[1])
+        {
+            load_ext();
+            int when[2];
+            for (int side = 0; side < 2; ++side)
+            {
+                int kills = 0;
+                for (int i = side; i < total && sky_cached(all[i]) && offends(all[i]); i += 2)
+                    kills += counted(all[i]);
+                int need = 7 - kills, t = 0;
+                for (int rep = 0; need > 0 && rep < 8; ++rep)
+                    for (int i = d - 2 + side; i >= 0 && need > 0; i -= 2)
+                    {
+                        ++t;
+                        need -= counted(q[i]);
+                    }
+                when[side] = need > 0 ? INT_MAX : side ? 2 * t - 1 : 2 * t;
+            }
+            if (when[0] == when[1])
+                return VALUE_DRAW;
+            return loss_for(when[0] < when[1] ? AColor : BColor);
+        }
+        if (killFam[0] != killFam[1])
+        {
+            const int  y      = killFam[0] ? 1 : 0;
+            const bool chaseY = !anyCheck[y] && !anyKill[y] && common[y];
+            const bool mixY   = allOffend[y] && anyCheck[y] && anyChase[y];
+            return loss_for((chaseY || mixY) == bool(y) ? BColor : AColor);
+        }
+    }
 
     // 1. Check/chase alternation (一将一捉) on one side.
     if (mixedA != mixedB)
@@ -2576,11 +2671,12 @@ bool Position::rule_judge(Value& result, int ply) {
     };
 
     // SkyRule / QiZheRule counters inside the search: the move just made is the 7th
-    // consecutive check (一子或多子连将合共最多 6 次) or continues a chase streak past
-    // its counter, so the mover had to change: it loses. Root moves are already
+    // consecutive check by one piece (每子最多 6 次，合共最多 18 次) or continues a
+    // chase streak past its counter, so the mover had to change: it loses. Root moves are already
     // filtered with the full counters, see Search::ThreadPool::start_thinking().
     if ((RuleConfig::repetitionRule == RR::SKY || RuleConfig::repetitionRule == RR::QIZHE)
-        && (st->skyCheckRun > 6 || (RuleConfig::skySearchChase && sky_chase_exceeded())))
+        && ((st->skyCheckRun > 6 && sky_check_exceeded())
+            || (RuleConfig::skySearchChase && sky_chase_exceeded())))
     {
         result = mate_in(ply);
         return true;
