@@ -86,6 +86,8 @@ class Engine {
     // ucinewgame: search_clear() and forget the time control / pondering of
     // the previous game (automatic Search Algorithm).
     void new_game();
+    // Windows: CPU priority "Idle" for other Pikafish processes.
+    void idle_other_pikafish() const;
 
     void set_on_update_no_moves(std::function<void(const InfoShort&)>&&);
     void set_on_update_full(std::function<void(const InfoFull&)>&&);
