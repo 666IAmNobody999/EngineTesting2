@@ -732,7 +732,7 @@ endif
 ### 3.3 Optimization
 ifeq ($(optimize),yes)
 
-	CXXFLAGS += -O3 -funroll-loops -fno-asynchronous-unwind-tables -fno-unwind-tables
+	CXXFLAGS += -O3 -funroll-loops -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-stack-protector
 
 	ifeq ($(comp),gcc)
 		ifeq ($(OS), Android)
