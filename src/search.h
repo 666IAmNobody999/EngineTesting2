@@ -269,6 +269,14 @@ constexpr int   HumanMinAdvantage = 150;
 constexpr int   HumanMinDrop      = 50;
 constexpr int   HumanMaxDrop      = 150;
 
+// Avoid_Sixty_Move_Draw (see Engine::avoid_sixty_move_draw()): the root is first
+// restricted to the captures, then to the offers, then all moves are searched. A
+// tier is skipped once its best move is a forced loss or worse than
+// -SixtyMaxDeficitCp normalised centipawns; a single candidate is searched to at
+// least SixtyVerifyDepth before it is played.
+constexpr int   SixtyMaxDeficitCp = 200;
+constexpr Depth SixtyVerifyDepth  = 8;
+
 // Draw play (Human-like, Human-like Bare King and Forced Draw): from game ply
 // DrawPlayMinPly (move 30) on, with the best move worth 0..DrawPlayMaxCp
 // normalised centipawns, the game is a draw anyway. A random searched root move
@@ -331,6 +339,10 @@ struct LimitsType {
     bool                     forceImproved;  // bench: no info string Search Algorithm
     SearchAlgorithm          algo;           // chosen by Engine::go()
     const char*              algoReason;     // why (info string), nullptr in bench
+    // Avoid_Sixty_Move_Draw: searchmoves holds its first tier (captures or offers);
+    // sixtyOffers the offers to fall back to after the captures, then all moves.
+    std::vector<std::string> sixtyOffers;
+    bool                     sixtyGuard = false;
 };
 
 
@@ -508,6 +520,8 @@ class Worker {
     StateInfo rootState;
     RootMoves rootMoves;
     Depth     rootDepth;
+    int       sixtyTier    = 0;      // Avoid_Sixty_Move_Draw tier being searched
+    bool      sixtyRestart = false;  // iterative_deepening() left to search the next tier
     Color     rootColor  = WHITE;
     AttackMode attackMode = AttackMode::BEST_MOVE;
     bool       avoidRepetition = false;

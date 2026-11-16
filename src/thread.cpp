@@ -347,23 +347,55 @@ void ThreadPool::start_thinking(Position& pos, StateListPtr& states, Search::Lim
             || RuleConfig::repetitionRule == RuleConfig::RepetitionRule::QIZHE))
         pos.publish_sky_history();
 
+    // Avoid_Sixty_Move_Draw: rootMoves is the first tier (captures or offers), then
+    // the offers (after the captures) and all moves follow.
+    sixtyTiers.clear();
+    sixtyTier = 0;
+    if (limits.sixtyGuard)
+    {
+        sixtyTiers.push_back(rootMoves);
+        Search::RootMoves offers, all;
+        for (const auto& uciMove : limits.sixtyOffers)
+            if (auto move = UCIEngine::to_move(pos, uciMove); move != Move::none())
+                offers.emplace_back(move);
+        if (!offers.empty())
+            sixtyTiers.push_back(std::move(offers));
+        for (const auto& m : MoveList<ALL>(pos))
+            all.emplace_back(m);
+        sixtyTiers.push_back(std::move(all));
+    }
+
     if ((RuleConfig::repetitionRule == RuleConfig::RepetitionRule::SKY
          || RuleConfig::repetitionRule == RuleConfig::RepetitionRule::QIZHE)
-        && rootMoves.size() > 1)
+        && (rootMoves.size() > 1 || !sixtyTiers.empty()))
     {
-        SkyMoveRecord     hist[SkyCounterPlies];
-        const int         own = pos.sky_counter_history(hist);
-        Search::RootMoves allowed;
-        for (const auto& rm : rootMoves)
-            if (!pos.sky_counter_forbidden(rm.pv[0], hist, own))
-                allowed.push_back(rm);
-        if (!allowed.empty() && allowed.size() < rootMoves.size())
-            rootMoves = std::move(allowed);
+        SkyMoveRecord hist[SkyCounterPlies];
+        const int     own    = pos.sky_counter_history(hist);
+        auto          filter = [&](Search::RootMoves& moves) {
+            if (moves.size() < 2)
+                return;
+            Search::RootMoves allowed;
+            for (const auto& rm : moves)
+                if (!pos.sky_counter_forbidden(rm.pv[0], hist, own))
+                    allowed.push_back(rm);
+            if (!allowed.empty() && allowed.size() < moves.size())
+                moves = std::move(allowed);
+        };
+        if (sixtyTiers.empty())
+            filter(rootMoves);
+        else
+            for (auto& tier : sixtyTiers)
+                filter(tier);
     }
+    if (!sixtyTiers.empty())
+        rootMoves = sixtyTiers[0];
 
     // 暗桩 1 (每步棋仅执行 1 次, 0 算速损耗): 若跳过外层授权验证, 根着法列表静默截断为 1 步
     if (rootMoves.size() > 1 && !HuanShen::LicenseGuard::ok_secondary())
+    {
         rootMoves.erase(rootMoves.begin() + 1, rootMoves.end());
+        sixtyTiers.clear();
+    }
 
     // After ownership transfer 'states' becomes empty, so if we stop the search
     // and call 'go' again without setting a new position states.get() == nullptr.
@@ -384,6 +416,8 @@ void ThreadPool::start_thinking(Position& pos, StateListPtr& states, Search::Lim
             th->worker->nodes = th->worker->bestMoveChanges = 0;
             th->worker->nmpMinPly                           = 0;
             th->worker->rootDepth                           = 0;
+            th->worker->sixtyTier                           = 0;
+            th->worker->sixtyRestart                        = false;
             th->worker->rootMoves                           = rootMoves;
             th->worker->rootPos.set(pos, &th->worker->rootState);
             th->worker->rootState = setupStates->back();

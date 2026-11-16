@@ -156,6 +156,11 @@ class ThreadPool {
 
     std::atomic_bool stop, increaseDepth;
 
+    // Avoid_Sixty_Move_Draw: the root move tiers (empty when not used) and the tier
+    // chosen by the main thread, see Search::Worker::iterative_deepening().
+    std::vector<Search::RootMoves> sixtyTiers;
+    std::atomic_int                sixtyTier{0};
+
     auto cbegin() const noexcept { return threads.cbegin(); }
     auto begin() noexcept { return threads.begin(); }
     auto end() noexcept { return threads.end(); }

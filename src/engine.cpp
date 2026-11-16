@@ -147,13 +147,13 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
       "Avoid_Repetition", Option(true));
 
     // Avoid_Sixty_Move_Draw: when materially ahead and the natural-move limit is
-    // a few plies away, only captures (or, without any, moves that offer the
-    // opponent a capture) are searched. When true it applies to
-    //  * HumanLike / HumanLikeBareKing: always (any time control, pondering or not);
-    //  * BestMove / BareKing: only at 0-1 s per move, a 1 minute game without
-    //    increment, or in analysis;
+    // a few plies away, only captures (or moves that offer the opponent a capture)
+    // are searched, skipping those that lose by force or by more than 200 cp.
+    //  * HumanLike / HumanLikeBareKing: always (any time control, pondering or not),
+    //    whatever the option;
+    //  * BestMove / BareKing: only when true, and only at 0-1 s per move, a 1 minute
+    //    game without increment, or in analysis;
     //  * Forced Draw: never.
-    // When false it never applies.
     options.add(  //
       "Avoid_Sixty_Move_Draw", Option(false));
 
@@ -410,23 +410,26 @@ void Engine::new_game() {
 
 // Avoid_Sixty_Move_Draw (see the option for the modes it applies to): with more material than
 // the opponent and at most SixtyWindow plies left before the natural-move draw,
-// restrict the root to captures; without a capture, to moves after which the
-// opponent can capture a piece (giving material away resets the counter too),
-// never our last attacking piece.
-// The search then picks the best of them. A forced mate (previous score) and an
-// explicit searchmoves list are left alone; at the very last ply only a capture
-// helps, so offers are not used there.
+// restrict the root to captures, then to moves after which the opponent can
+// capture a piece (giving material away resets the counter too, never our last
+// attacking piece), then all moves. The search picks the best move of a tier and
+// moves on to the next one when that move loses by force or by more than
+// Attack::SixtyMaxDeficitCp (see Search::Worker::iterative_deepening()). A forced
+// mate (previous score) and an explicit searchmoves list are left alone; at the
+// very last ply only a capture helps, so offers are not used there.
 void Engine::avoid_sixty_move_draw(Search::LimitsType& limits) {
     constexpr int SixtyWindow = 6;
 
-    if (!limits.searchmoves.empty() || limits.forceImproved || !options["Avoid_Sixty_Move_Draw"])
+    if (!limits.searchmoves.empty() || limits.forceImproved)
         return;
 
-    // HumanLike / HumanLikeBareKing: always. BestMove / BareKing: only in a fast
-    // game or analysis (sixtyFastGame). Forced Draw: never.
+    // HumanLike / HumanLikeBareKing: always, whatever the option. BestMove / BareKing:
+    // only with the option, in a fast game or analysis (sixtyFastGame). Forced Draw:
+    // never.
     const auto mode = Search::Attack::parse(options);
     if (mode == Search::AttackMode::FORCED_DRAW
-        || (!Search::Attack::human_like(mode) && !sixtyFastGame))
+        || (!Search::Attack::human_like(mode)
+            && (!options["Avoid_Sixty_Move_Draw"] || !sixtyFastGame)))
         return;
 
     const int left = RuleConfig::rule60Limit - pos.rule60_count();
@@ -456,7 +459,7 @@ void Engine::avoid_sixty_move_draw(Search::LimitsType& limits) {
             captures.push_back(UCIEngine::move(m));
             continue;
         }
-        if (left < 2 || !captures.empty())
+        if (left < 2)
             continue;
 
         // The offered piece must not be our last attacking piece (rook, knight,
@@ -482,9 +485,13 @@ void Engine::avoid_sixty_move_draw(Search::LimitsType& limits) {
     }
 
     if (!captures.empty())
+    {
         limits.searchmoves = std::move(captures);
+        limits.sixtyOffers = std::move(offers);
+    }
     else if (!offers.empty())
         limits.searchmoves = std::move(offers);
+    limits.sixtyGuard = !limits.searchmoves.empty();
 }
 
 void Engine::stop() { threads.stop = true; }

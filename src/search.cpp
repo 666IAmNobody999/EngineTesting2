@@ -185,7 +185,11 @@ void Search::Worker::start_searching() {
     // Non-main threads go directly to iterative_deepening()
     if (!is_mainthread())
     {
-        iterative_deepening();
+        do
+        {
+            sixtyRestart = false;
+            iterative_deepening();
+        } while (sixtyRestart);
         return;
     }
 
@@ -203,7 +207,12 @@ void Search::Worker::start_searching() {
 
     // Main thread starts non-main threads, and begins own search
     threads.start_searching();
-    bool uciPvSent = iterative_deepening();
+    bool uciPvSent;
+    do  // Avoid_Sixty_Move_Draw: once more for each tier that is skipped
+    {
+        sixtyRestart = false;
+        uciPvSent    = iterative_deepening();
+    } while (sixtyRestart);
 
     // When we reach the maximum depth, we can arrive here without a raise of
     // threads.stop. However, if we are pondering or in an infinite search,
@@ -233,8 +242,9 @@ void Search::Worker::start_searching() {
     // With a strength handicap or in Forced Draw / Human-like mode the main
     // thread has already swapped its chosen move into rootMoves[0]; thread
     // voting would undo that.
+    // After an Avoid_Sixty_Move_Draw tier change a helper may still hold the old tier.
     if (!limits.depth && !skill.enabled() && Attack::parse(options) != AttackMode::FORCED_DRAW
-        && !Attack::human_like(Attack::parse(options)))
+        && !Attack::human_like(Attack::parse(options)) && !sixtyTier)
         bestThread = threads.get_best_thread()->worker.get();
 
     main_manager()->bestPreviousScore        = bestThread->rootMoves[0].score;
@@ -375,6 +385,17 @@ bool Search::Worker::iterative_deepening() {
     while (rootDepth + 1 < MAX_PLY && !threads.stop
            && !(limits.depth && mainThread && rootDepth >= limits.depth))
     {
+        // Avoid_Sixty_Move_Draw: the main thread has skipped the tier this thread is
+        // searching, start again on the next one.
+        if (!threads.sixtyTiers.empty() && threads.sixtyTier > sixtyTier)
+        {
+            sixtyTier    = threads.sixtyTier;
+            rootMoves    = threads.sixtyTiers[sixtyTier];
+            rootDepth    = 0;
+            sixtyRestart = true;
+            return false;
+        }
+
         rootDepth++;
 
         // 暗桩 3 (每层深度仅检查 1 次, 0 算速损耗): 若跳过授权验证, 搜到第 6 层后静默停止加深
@@ -685,6 +706,21 @@ bool Search::Worker::iterative_deepening() {
         if (!mainThread)
             continue;
 
+        // Avoid_Sixty_Move_Draw: skip this tier when even its best move is a forced
+        // loss or more than SixtyMaxDeficitCp behind.
+        const bool sixtyPending = sixtyTier + 1 < int(threads.sixtyTiers.size());
+        if (sixtyPending && !threads.stop
+            && (is_loss(rootMoves[0].score)
+                || UCIEngine::to_cp_normalized(rootMoves[0].score, rootPos)
+                     < -Attack::SixtyMaxDeficitCp))
+        {
+            threads.sixtyTier = ++sixtyTier;
+            rootMoves         = threads.sixtyTiers[sixtyTier];
+            rootDepth         = 0;
+            sixtyRestart      = true;
+            return false;
+        }
+
         // If the skill level is enabled and time is up, pick a sub-optimal best move
         if (skill.enabled() && skill.time_to_pick(rootDepth))
             skill.pick_best(rootMoves, multiPV);
@@ -724,7 +760,7 @@ bool Search::Worker::iterative_deepening() {
             double totalTime = mainThread->tm.optimum() * fallingEval * reduction
                              * bestMoveInstability * highBestMoveEffort;
 
-            if (rootMoves.size() == 1)
+            if (rootMoves.size() == 1 && (!sixtyPending || rootDepth >= Attack::SixtyVerifyDepth))
                 threads.stop = true;
 
             auto elapsedTime = elapsed();
