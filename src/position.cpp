@@ -2108,8 +2108,10 @@ void Position::set_sky_info(int d) {
 //      otherwise one piece is limited to 12 moves, more than one piece to 18
 //      moves, the side with the tighter limit changes, equal limits are a draw.
 //   3. One side keeps a common victim, the other does not: the chaser changes.
-//   4. Both sides only chase (长捉 vs 长捉), each keeping a common victim: draw
-//      (天天象棋 / 棋者象棋：6 回合，双方连续长捉，判和).
+//   4. Both sides only chase (长捉 vs 长捉), each keeping a common victim: when the
+//      chases meet (a side chases a piece the other side chases with) the side
+//      that started first changes; independent chases are a draw (天天象棋 /
+//      棋者象棋：6 回合，双方连续长捉，判和).
 // QiZheRule (棋者象棋) uses it with 杀 (一步杀) stored as a chase of the king; a side
 // whose whole cycle is offensive with at least one kill (长杀、一将一杀、一捉一杀) is
 // judged first, see below.
@@ -2412,13 +2414,24 @@ Value Position::detect_sky_cycle(int d, int ply) {
     if (!A && B)
         return loss_for(BColor);
 
-    // 4. Pure chase against pure chase (长捉 vs 长捉): each chase counter allows 6 moves
-    //    and 6 回合双方连续长捉判和, so the moves are played on: a side whose 7th chase
-    //    comes while the other has made fewer than 6 changes, otherwise it is a draw.
-    //    A streak goes back while each chase shares a victim with the next one (same
-    //    counter as sky_last_move_exceeds()).
+    // 4. Pure chase against pure chase (长捉 vs 长捉). A streak goes back while each
+    //    chase shares a victim with the next one (same counter as
+    //    sky_last_move_exceeds()).
+    //    - The chases meet (one side chases a piece the other side chases with, e.g.
+    //      the chased piece blocks or uncovers the chase it answers, 棋例20 / 24 / 25
+    //      / 33): the side that started chasing first changes. The streaks
+    //      interleave, so the older start is the larger index (never equal); only
+    //      when both reach the end of a capped history is it unknown.
+    //    - Independent chases: each counter allows 6 moves and 6 回合双方连续长捉判和,
+    //      so the moves are played on: a side whose 7th chase comes while the other
+    //      has made fewer than 6 changes, otherwise it is a draw.
     if (!anyCheck[0] && !anyCheck[1])
     {
+        u16 victims[2] = {0, 0};
+        for (int i = 0; i < d; ++i)
+            victims[i & 1] |= q[i]->skyVictims;
+        const bool meet = (victims[0] & identities[1]) || (victims[1] & identities[0]);
+
         load_ext();
         auto chain_oldest = [&](int side, u16 link) {
             int oldest = -1;
@@ -2434,6 +2447,12 @@ Value Position::detect_sky_cycle(int d, int ply) {
         const int oldA = chain_oldest(0, A), oldB = chain_oldest(1, B);
         if (oldA < d - 2 || oldB < d - 1)
             return VALUE_DRAW;  // Sky info missing
+        if (meet)
+        {
+            if (capped && oldA >= total - 2 && oldB >= total - 2)
+                return VALUE_DRAW;
+            return loss_for(oldA > oldB ? AColor : BColor);
+        }
         if (capped && (oldA >= total - 2 || oldB >= total - 2))
             return VALUE_DRAW;  // a streak may be longer than known
         const int r = sky_mutual_run(oldA / 2 + 1, 6, oldB / 2 + 1, 6);
