@@ -1592,7 +1592,8 @@ int Position::sky_records(SkyMoveRecord* out, int maxPlies, int killParity) {
         {
             // QiZheRule「当前走的棋子造成杀，才算杀」(一步杀): the threat must
             // disappear without the moved piece (a king move: the threat must be new).
-            // A check is counted as a check, never as a kill.
+            // 将军优先于捉，捉优先于杀: a check is counted as a check and a chase as a
+            // chase, never as a kill.
             const bool kingMove = type_of(scratch.piece_on(cur->move.to_sq())) == KING;
             const u16  moverId  = u16(1u << scratch.idBoard[cur->move.to_sq()]);
             bool       kill     = (n & 1) == killParity && !r.check && scratch.has_mate_threat(-1, 1);
@@ -1606,7 +1607,7 @@ int Position::sky_records(SkyMoveRecord* out, int maxPlies, int killParity) {
             SkyChaseMap exact  = after.exact_diff(before);
             r.victims          = exact.victims();
             r.chasers          = exact.chasers();
-            r.kill             = kill && !(kingMove && scratch.has_mate_threat(0, 1));
+            r.kill             = kill && !r.victims && !(kingMove && scratch.has_mate_threat(0, 1));
             if (r.kill)
                 r.chasers = moverId;  // the killing piece
         }
@@ -1627,10 +1628,10 @@ namespace {
 //   将捉交替：单子 12 回合，一子以上 18 回合。
 //   吃子后清空所有将和捉次数，当前次数为零（连将：将军方自己吃子后重新计算，对方吃子
 //   应将不清空）。
-// QiZheRule（棋者象棋，实测与天天象棋相同）另计「杀」（一步杀；将军优先于杀，杀优先于
-//   捉）：单子长杀、多子长杀、一捉一杀、一将一杀交替，都是第 7 次杀强制变招（杀的次数
-//   只在吃子或闲着时清空；应将产生的杀保留但不增加）。杀会清空捉次数和连将，不计入
-//   一将一捉的交替。
+// QiZheRule（棋者象棋，实测与天天象棋相同）另计「杀」（一步杀；将军优先于捉，捉优先于
+//   杀）：单子长杀、多子长杀、一捉一杀、一将一杀交替，都可以杀 7 次，第 8 次杀强制变招
+//   （杀的次数只在吃子或闲着时清空；应将产生的杀保留但不增加）。杀会清空捉次数和连将，
+//   不计入一将一捉的交替。
 // 连将上限: one piece checking on two consecutive own moves -> 6; otherwise (the
 // checking piece changes every move) two pieces -> 12, three or more -> 18.
 // Both sides keep up a streak (连将 or 长捉), the mover with runA moves so far (limit
@@ -1695,7 +1696,7 @@ struct SkyCounters {
             clear_checks();
             std::memset(chaseCnt, 0, sizeof(chaseCnt));
             if (!r.evasion)
-                exceeded |= ++killCnt > 6;
+                exceeded |= ++killCnt > 7;
             return exceeded;
         }
         else if (r.victims)
@@ -1814,7 +1815,7 @@ void Position::publish_sky_history() {
 
 
 // In search: whether the move just made makes the mover exceed one of its 天天象棋
-// counters (长捉 6, 一将一捉 12 / 18, QiZheRule 长杀 6; 连将 is skyCheckRun). The
+// counters (长捉 6, 一将一捉 12 / 18, QiZheRule 长杀 7; 连将 is skyCheckRun). The
 // counters are only replayed when the mover has made at least 7 consecutive moves
 // that may be offensive (skyMaybeRun, a cheap superset), so the normal search path
 // costs a few instructions.
@@ -2063,7 +2064,8 @@ void Position::set_sky_info(int d) {
         // QiZheRule 杀 (一步杀, made by the moved piece; a king move: a new threat) is
         // stored as a chase of the opponent's king (a king is never chased otherwise)
         // by the moved piece, with skyCheckers = 1 as the kill marker (skyCheckers is
-        // 0 for every other non-checking move). SkyRule has no kill.
+        // 0 for every other non-checking move). 捉优先于杀: a move that also chases is
+        // stored as the chase. SkyRule has no kill.
         bool kill = false;
         u16  kingBit = 0, moverBit = 0;
         if (RuleConfig::repetitionRule == RuleConfig::RepetitionRule::QIZHE && has_mate_threat(-1, 1))
@@ -2079,14 +2081,12 @@ void Position::set_sky_info(int d) {
         st = cur->previous;
         if (kill && type_of(piece_on(cur->move.from_sq())) == KING)
             kill = !has_mate_threat(0, 1);
-        if (kill)
-        {
-            sky_publish(cur, kingBit, 1, moverBit);
-            continue;
-        }
         SkyChaseMap before = sky_chased(mover);
         SkyChaseMap exact  = after.exact_diff(before);
-        sky_publish(cur, exact.victims(), 0, exact.chasers());
+        if (kill && !exact.victims())
+            sky_publish(cur, kingBit, 1, moverBit);
+        else
+            sky_publish(cur, exact.victims(), 0, exact.chasers());
     }
 }
 
@@ -2271,11 +2271,11 @@ Value Position::detect_sky_cycle(int d, int ply) {
         return oldest;
     };
 
-    // QiZheRule 杀: 长杀、一捉一杀、一将一杀 may kill 6 times (the 7th kill must
+    // QiZheRule 杀: 长杀、一捉一杀、一将一杀 may kill 7 times (the 8th kill must
     // change), which outlasts 长捉 (6 chases) and 一将一捉 (12 / 18 moves):
     //   杀 vs 长捉 / 一将一捉: the chasing side changes; 杀 vs anything else (idle,
     //   split chases, ...): the killing side changes; 杀 vs 杀: the side that reaches
-    //   its 7th kill first (counting the kills before the cycle) changes.
+    //   its 8th kill first (counting the kills before the cycle) changes.
     // 长将 vs 杀 is judged by rule_judge() (长将方负).
     if (anyKill[0] || anyKill[1])
     {
@@ -2292,8 +2292,8 @@ Value Position::detect_sky_cycle(int d, int ply) {
                 int kills = 0;
                 for (int i = side; i < total && sky_cached(all[i]) && offends(all[i]); i += 2)
                     kills += counted(all[i]);
-                int need = 7 - kills, t = 0;
-                for (int rep = 0; need > 0 && rep < 8; ++rep)
+                int need = 8 - kills, t = 0;
+                for (int rep = 0; need > 0 && rep < 9; ++rep)
                     for (int i = d - 2 + side; i >= 0 && need > 0; i -= 2)
                     {
                         ++t;
