@@ -309,7 +309,13 @@ struct Skill {
     }
     bool enabled() const { return level < 20.0; }
     bool time_to_pick(Depth depth) const { return depth == 1 + int(level); }
-    Move pick_best(const RootMoves&, usize multiPV);
+    // Largest score drop from the best move a handicapped engine may play:
+    // 2 pawns at level 0 down to about half a pawn at level 19, so it makes
+    // small mistakes but never gives a piece away.
+    int  max_drop() const { return int(PawnValue / 2 + PawnValue * 3 / 2 * (20 - level) / 20); }
+    bool allowed(const Position& pos, const RootMoves& rootMoves, usize i) const;
+    static bool recapture(const Position& pos, const RootMoves& rootMoves);
+    Move pick_best(const Position& pos, const RootMoves& rootMoves, usize multiPV);
 
     double level;
     Move   best = Move::none();

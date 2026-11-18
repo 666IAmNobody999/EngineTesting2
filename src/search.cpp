@@ -723,7 +723,7 @@ bool Search::Worker::iterative_deepening() {
 
         // If the skill level is enabled and time is up, pick a sub-optimal best move
         if (skill.enabled() && skill.time_to_pick(rootDepth))
-            skill.pick_best(rootMoves, multiPV);
+            skill.pick_best(rootPos, rootMoves, multiPV);
 
         // Do we have time for the next iteration? Can we stop searching now?
         if (limits.use_time_management() && !threads.stop && !mainThread->stopOnPonderhit)
@@ -793,16 +793,20 @@ bool Search::Worker::iterative_deepening() {
     // If the skill level is enabled, swap the best PV line with the sub-optimal one
     if (skill.enabled())
     {
-        Move chosen = skill.best ? skill.best : skill.pick_best(rootMoves, multiPV);
+        Move chosen = skill.best ? skill.best : skill.pick_best(rootPos, rootMoves, multiPV);
         auto it     = std::find(rootMoves.begin(), rootMoves.end(), chosen);
 
-        // A move fixed at a shallow depth that the full search now shows to be
-        // losing (score below a draw) is not played; choose again from the
-        // final scores (the best move when behind, a sound move otherwise).
-        if (it != rootMoves.end() && it->score != -VALUE_INFINITE && it->score < VALUE_DRAW
-            && rootMoves[0].score >= VALUE_DRAW)
+        // A move fixed at a shallow depth is played only if the full search still
+        // allows it (see Skill::allowed): among the searched MultiPV lines, not
+        // giving material away and no recapture due. Otherwise (also when it fell
+        // out of the MultiPV lines, so its final score is unknown) choose again
+        // from the final scores.
+        const usize idx = usize(it - rootMoves.begin());
+        if (idx != 0
+            && (it == rootMoves.end() || idx >= multiPV || Skill::recapture(rootPos, rootMoves)
+                || !skill.allowed(rootPos, rootMoves, idx)))
         {
-            chosen = skill.pick_best(rootMoves, multiPV);
+            chosen = skill.pick_best(rootPos, rootMoves, multiPV);
             it     = std::find(rootMoves.begin(), rootMoves.end(), chosen);
         }
 
@@ -993,34 +997,53 @@ bool Search::Worker::iterative_deepening() {
 
 // When playing with strength handicap, choose the best move among a set of
 // RootMoves using a statistical rule dependent on 'level'. Idea by Heinz van Saanen.
-Move Search::Skill::pick_best(const RootMoves& rootMoves, usize multiPV) {
+// The opponent has just captured and the best move captures back (e.g. in the
+// middle of an exchange): a human always takes back, so no other move is played.
+bool Search::Skill::recapture(const Position& pos, const RootMoves& rootMoves) {
+    return pos.captured_piece() != NO_PIECE && pos.capture(rootMoves[0].pv[0]);
+}
+
+// A handicapped engine may play a worse move, also when behind, but never one
+// that gives material away: a move that loses the exchange on its target square
+// (static exchange evaluation below zero), a move that the search shows to be
+// more than maxDrop() worse than the best one (e.g. it leaves another piece
+// hanging), or a move that gets mated. The best move is always allowed.
+bool Search::Skill::allowed(const Position& pos, const RootMoves& rootMoves, usize i) const {
+    if (i == 0)
+        return true;
+    const RootMove& rm = rootMoves[i];
+    return rm.score != -VALUE_INFINITE && !is_loss(rm.score)
+        && rootMoves[0].score - rm.score <= max_drop() && pos.see_ge(rm.pv[0], 0);
+}
+
+Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, usize multiPV) {
     static PRNG rng(u64(now()) | 1);  // PRNG sequence should be non-deterministic
 
     Value topScore = rootMoves[0].score;
+    best           = rootMoves[0].pv[0];
 
-    // A handicapped engine never gambles when it is already behind: with the
-    // best move below a draw it plays the best move and nothing is fixed, so
-    // the final (deepest) best move is used when the search ends.
-    if (topScore < VALUE_DRAW)
-        return rootMoves[0].pv[0];
+    if (recapture(pos, rootMoves))
+        return best;
 
-    // RootMoves are already sorted by score in descending order. Only lines
-    // that were searched in this iteration (a stopped search may leave some at
-    // -VALUE_INFINITE) and that keep at least a draw (score >= 0) are
-    // candidates, so a weak move is never chosen in place of a sound one.
-    usize valid = 1;
-    while (valid < multiPV && rootMoves[valid].score >= VALUE_DRAW)
-        ++valid;
+    // RootMoves are already sorted by score in descending order. Only the best
+    // move and the allowed alternatives (see Skill::allowed) are candidates.
+    Value worst = topScore;
+    for (usize i = 1; i < multiPV; ++i)
+        if (allowed(pos, rootMoves, i))
+            worst = std::min(worst, rootMoves[i].score);
 
-    int    delta    = std::min(topScore - rootMoves[valid - 1].score, int(PawnValue));
+    int    delta    = std::min(topScore - worst, int(PawnValue));
     int    maxScore = -VALUE_INFINITE;
     double weakness = 120 - 2 * level;
 
     // Choose best move. For each move score we add two terms, both dependent on
     // weakness. One is deterministic and bigger for weaker levels, and one is
     // random. Then we choose the move with the resulting highest score.
-    for (usize i = 0; i < valid; ++i)
+    for (usize i = 0; i < multiPV; ++i)
     {
+        if (!allowed(pos, rootMoves, i))
+            continue;
+
         // This is our magic formula
         int push = int((weakness * int(topScore - rootMoves[i].score)
                         + delta * (rng.rand<unsigned>() % int(weakness)))
