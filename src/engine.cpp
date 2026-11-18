@@ -45,6 +45,7 @@
 #include "uci.h"
 #include "ucioption.h"
 #include "winperf.h"
+#include "xqbook.h"
 #include "hwid_lock.h"
 
 namespace Stockfish {
@@ -67,6 +68,65 @@ std::string numa_policy_name(const Option& o) {
         if (o == name)
             return name;
     return "auto";
+}
+
+// Opening book (XiangQi Wizard / ElephantEye, see xqbook.h), used only with a
+// strength handicap so that the opening looks like a human game. The weaker the
+// level, the earlier it leaves the book (book depth = fewest plies from the
+// start position): Pro all, Ama 9..7 20 plies, Ama 6..5 12, Ama 4..1 6,
+// Stu 3. Skill Level 0..19 (without a human rating): 15..19 20, 10..14 12,
+// 5..9 6, 0..4 3. 0: no book.
+int book_max_depth(const OptionsMap& options) {
+    if (const int elo = Search::Skill::human_elo(options))
+        return elo >= 2280 ? 255 : elo >= 1800 ? 20 : elo >= 1450 ? 12 : elo >= 850 ? 6 : 3;
+    const int level = int(options["Skill Level"]);
+    return level >= 20 ? 0 : level >= 15 ? 20 : level >= 10 ? 12 : level >= 5 ? 6 : 3;
+}
+
+// FNV-1a over the 90 squares (FEN letters, 0 for empty) and the side to move,
+// the same function the book was generated with.
+u64 book_hash(const Position& pos) {
+    constexpr char PieceChar[] = "?RACPNBK?racpnbk";
+    u64            h           = 0xCBF29CE484222325ULL;
+    for (Square s = SQ_A0; s <= SQ_I9; ++s)
+    {
+        const Piece pc = pos.piece_on(s);
+        h              = (h ^ u64(pc == NO_PIECE ? 0 : PieceChar[pc])) * 0x100000001B3ULL;
+    }
+    return (h ^ u64(pos.side_to_move() == BLACK)) * 0x100000001B3ULL;
+}
+
+// A legal book move of the position at most maxDepth - 1 plies from the start,
+// chosen at random in proportion to its weight, else Move::none().
+Move book_move(const Position& pos, int maxDepth) {
+    const u64   key = book_hash(pos);
+    const auto* lo  = std::lower_bound(std::begin(Book::Entries), std::end(Book::Entries), key,
+                                       [](const Book::Entry& e, u64 k) { return e.key < k; });
+    if (lo == std::end(Book::Entries) || lo->key != key || lo->depth >= maxDepth)
+        return Move::none();
+
+    const MoveList<ALL> legal(pos);
+    Move                  moves[64];
+    u32                   weights[64], total = 0;
+    usize                 n = 0;
+    for (const auto* e = lo; e != std::end(Book::Entries) && e->key == key && n < 64; ++e)
+        if (legal.contains(Move(e->move)))
+        {
+            moves[n]   = Move(e->move);
+            weights[n] = e->weight;
+            total += weights[n++];
+        }
+    if (!total)
+        return Move::none();
+
+    static PRNG rng(u64(now()) | 1);
+    u32         r = u32(rng.rand<u64>() % total);
+    for (usize i = 0; i < n; ++i)
+        if (r < weights[i])
+            return moves[i];
+        else
+            r -= weights[i];
+    return moves[n - 1];
 }
 
 }  // namespace
@@ -332,6 +392,20 @@ void Engine::go(Search::LimitsType& limits) {
 
     choose_search_algorithm(limits);
     avoid_sixty_move_draw(limits);
+
+    // Opening book with a strength handicap, only for game moves (a clock, go
+    // movetime / depth / nodes), never in analysis (go infinite or no limit),
+    // pondering, bench or with a searchmoves list. The book move is the only
+    // root move and a depth 1 search sends the usual info and bestmove.
+    if (!limits.infinite && !limits.ponderMode && !limits.forceImproved
+        && limits.searchmoves.empty()
+        && (limits.use_time_management() || limits.movetime || limits.depth || limits.nodes))
+        if (const int maxDepth = book_max_depth(options))
+            if (const Move m = book_move(pos, maxDepth))
+            {
+                limits.searchmoves = {UCIEngine::move(m)};
+                limits.depth       = 1;
+            }
 
     // Human rating handicap: a fixed node budget per move, so that the strength
     // does not depend on the hardware or the time control.
