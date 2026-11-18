@@ -301,13 +301,17 @@ AttackMode parse(const OptionsMap& options);
 // engine searches a limited number of nodes (so the strength does not depend on
 // the hardware or the time control) and picks among the MultiPV lines with a
 // probability falling with the score drop, the temperature rising as the rating
-// falls. From TianTian Ama 5-1 up it never gives material away; below that
-// rating it may hang pieces and miss mates as beginners do.
+// falls. The lines are judged as a human sees them: only a few plies deep
+// (deeper with the rating), so the errors are those of a human, a combination
+// beyond the horizon is missed and a deeper loss is not seen; beginners also
+// overlook captures, mostly by cannons, knights and far rooks. From TianTian
+// Ama 5-1 up a move that loses the exchange on its target square is never
+// played.
 struct Skill {
     // Range of the human rating scale of UCI_Elo
     constexpr static int LowestElo  = 500;
     constexpr static int HighestElo = 2850;
-    // Below this rating (TianTian Ama 5-1) blunders are possible
+    // Below this rating (TianTian Ama 5-1) a piece may be hung
     constexpr static int BlunderElo = 1450;
 
     Skill(int skill_level, int human_elo) :
@@ -327,7 +331,7 @@ struct Skill {
     // (Skill Level: internal units, 2 pawns at level 0 down to about half a pawn
     // at level 19; human rating: normalised centipawns).
     int  max_drop() const;
-    bool allowed(const Position& pos, const RootMoves& rootMoves, usize i, bool blind = false) const;
+    bool allowed(const Position& pos, const RootMoves& rootMoves, usize i) const;
     static bool recapture(const Position& pos, const RootMoves& rootMoves);
     Move pick_best(const Position& pos, const RootMoves& rootMoves, usize multiPV);
 

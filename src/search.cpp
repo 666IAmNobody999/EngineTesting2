@@ -22,6 +22,7 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -1000,18 +1001,21 @@ bool Search::Worker::iterative_deepening() {
 namespace {
 
 // Human rating scale of Skill: anchor ratings with their node budget per move,
-// the temperature of the move choice and the largest allowed score drop (both in
-// normalised centipawns), and the probability that a move is chosen "blind",
-// i.e. also among moves that hang a piece or walk into a mate (beginners only).
+// the temperature of the move choice and the largest allowed drop of the
+// perceived score (both in normalised centipawns), the sight (how many plies of
+// each line after the move a player of that rating follows, see human_view) and
+// the probability that a beginner overlooks a capture by a cannon, a knight or
+// a rook from afar (other captures: a third of it; Ama 5-1 and up: never).
 // Linear interpolation in between (the node budget geometrically).
 struct HumanAnchor {
     int    elo;
-    double nodes, temperature, maxDrop, blind;
+    double nodes, temperature, maxDrop, sight, overlook;
 };
 constexpr HumanAnchor HumanAnchors[] = {
-  {500, 300, 600, 5000, 0.95}, {900, 2500, 150, 1000, 0.25}, {1200, 5000, 85, 400, 0.05},
-  {1450, 6000, 90, 300, 0},      {1800, 12000, 70, 220, 0},   {2150, 40000, 35, 140, 0},
-  {2450, 150000, 15, 70, 0},     {2850, 1000000, 4, 30, 0}};
+  {500, 300, 600, 5000, 1, 0.7},      {900, 2500, 150, 1000, 1.3, 0.25},
+  {1200, 5000, 85, 400, 2, 0.05},     {1450, 6000, 90, 300, 2.5, 0},
+  {1800, 12000, 70, 220, 3.5, 0},     {2150, 40000, 35, 140, 5, 0},
+  {2450, 150000, 15, 70, 7, 0},       {2850, 1000000, 4, 30, 11, 0}};
 
 template<typename F>
 double human_param(int elo, F get, bool geometric = false) {
@@ -1027,6 +1031,58 @@ double human_param(int elo, F get, bool geometric = false) {
                              : get(lo) + (get(hi) - get(lo)) * t;
         }
     return get(HumanAnchors[N - 1]);
+}
+
+// Pieces whose captures beginners overlook: cannons (over a screen), knights
+// and rooks from at least three squares away.
+bool hard_to_see(Piece mover, Move m) {
+    const PieceType pt = type_of(mover);
+    if (pt == CANNON || pt == KNIGHT)
+        return true;
+    const Square f = m.from_sq(), t = m.to_sq();
+    return pt == ROOK
+        && std::max(std::abs(file_of(f) - file_of(t)), std::abs(rank_of(f) - rank_of(t))) >= 3;
+}
+
+// How a human sees a searched line: the material won or lost (side to move at
+// the root, internal units) along the PV, on a plain board copy, up to the end
+// of the line (end) and up to the player's horizon (seen). The horizon is the
+// root move plus `sight` replies, extended while the next move takes back on the
+// square just captured (an exchange is always followed to its end). With
+// missReply the reply is overlooked, so only the root move itself is seen.
+struct HumanView {
+    Value seen, end;
+};
+
+HumanView human_view(const Position& pos, const RootMove& rm, int sight, bool missReply) {
+    Piece board[SQUARE_NB];
+    for (Square sq = SQ_A0; sq <= SQ_I9; ++sq)
+        board[sq] = pos.piece_on(sq);
+
+    const Color us      = pos.side_to_move();
+    const int   horizon = missReply ? 0 : sight;
+    Value       bal     = VALUE_ZERO;
+    HumanView   v{VALUE_ZERO, VALUE_ZERO};
+    bool        fixed = false;
+    for (usize k = 0; k < rm.pv.size(); ++k)
+    {
+        const Square f = rm.pv[k].from_sq(), t = rm.pv[k].to_sq();
+        const Piece  cap = board[t];
+        if (cap != NO_PIECE)
+            bal += color_of(cap) == us ? -PieceValue[cap] : PieceValue[cap];
+        board[t] = board[f];
+        board[f] = NO_PIECE;
+        if (!fixed && int(k) >= horizon
+            && !(cap != NO_PIECE && k + 1 < rm.pv.size() && rm.pv[k + 1].to_sq() == t))
+        {
+            v.seen = bal;
+            fixed  = true;
+        }
+    }
+    v.end = bal;
+    if (!fixed)
+        v.seen = bal;
+    return v;
 }
 
 }  // namespace
@@ -1086,7 +1142,7 @@ bool Search::Skill::recapture(const Position& pos, const RootMoves& rootMoves) {
 // (static exchange evaluation below zero), a move that the search shows to be
 // more than maxDrop() worse than the best one (e.g. it leaves another piece
 // hanging), or a move that gets mated. The best move is always allowed.
-bool Search::Skill::allowed(const Position& pos, const RootMoves& rootMoves, usize i, bool blind) const {
+bool Search::Skill::allowed(const Position& pos, const RootMoves& rootMoves, usize i) const {
     if (i == 0)
         return true;
     const RootMove& rm = rootMoves[i];
@@ -1097,9 +1153,7 @@ bool Search::Skill::allowed(const Position& pos, const RootMoves& rootMoves, usi
                          : int(rootMoves[0].score - rm.score);
     if (drop > max_drop())
         return false;
-    // A blind choice (beginners) may also hang a piece or walk into a mate, up
-    // to the drop limit, which widens as the rating falls.
-    return blind || (!is_loss(rm.score) && pos.see_ge(rm.pv[0], 0));
+    return !is_loss(rm.score) && pos.see_ge(rm.pv[0], 0);
 }
 
 Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, usize multiPV) {
@@ -1111,26 +1165,107 @@ Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, u
     if (recapture(pos, rootMoves))
         return best;
 
-    // Human rating: choose among the allowed lines with a probability falling
-    // exponentially with the score drop (normalised centipawns).
+    // Human rating: errors as a human makes them. Every searched line is judged
+    // as the player sees it: material won or lost beyond the player's horizon
+    // (see human_view) is not seen, so a move that loses a piece to a deeper
+    // combination looks fine, a winning combination deeper than the horizon is
+    // not noticed, and a mate is seen only within the horizon. Beginners also
+    // overlook some captures, mostly by cannons, knights and far rooks, both
+    // the opponent's reply and their own chance to capture. From Ama 5-1 up a
+    // move that loses the exchange on its target square (SEE below zero) is
+    // never played, nor a mate that is seen. Among the remaining lines the
+    // choice falls exponentially with the drop of the perceived score.
     if (elo)
     {
-        const double T     = human_param(elo, [](const HumanAnchor& a) { return a.temperature; });
-        const double pBlind = human_param(elo, [](const HumanAnchor& a) { return a.blind; });
-        const bool   blind  = double(rng.rand<u64>() >> 11) * (1.0 / 9007199254740992.0) < pBlind;
-        const int    topCp = UCIEngine::to_cp_normalized(topScore, pos);
-        double       w[MAX_MOVES], total = 0;
-        usize        n = std::min(multiPV, rootMoves.size());
+        auto uniform = [&] { return double(rng.rand<u64>() >> 11) * (1.0 / 9007199254740992.0); };
+        const double T        = human_param(elo, [](const HumanAnchor& a) { return a.temperature; });
+        const double sightF   = human_param(elo, [](const HumanAnchor& a) { return a.sight; });
+        const double overlook = human_param(elo, [](const HumanAnchor& a) { return a.overlook; });
+        const int    sight    = int(sightF + uniform());  // fractional part: sometimes one ply more
+        const usize  n        = std::min(multiPV, rootMoves.size());
+
+        int  perceived[MAX_MOVES];
+        bool ok[MAX_MOVES];
+        int  posSum = 0, posCnt = 0;
+        int  seenCp[MAX_MOVES];
+        for (usize i = 0; i < n; ++i)
+        {
+            const RootMove& rm = rootMoves[i];
+            ok[i]              = rm.score != -VALUE_INFINITE;
+            if (!ok[i])
+                continue;
+
+            const Piece movedPc = pos.moved_piece(rm.pv[0]);
+            // Own capture overlooked: the move is not considered at all.
+            if (overlook > 0 && pos.capture(rm.pv[0]) && !(i == 0 && recapture(pos, rootMoves))
+                && uniform() < (hard_to_see(movedPc, rm.pv[0]) ? overlook : overlook / 3) / 2)
+            {
+                ok[i] = false;
+                continue;
+            }
+            if (elo >= BlunderElo && i != 0 && !pos.see_ge(rm.pv[0], 0))
+            {
+                ok[i] = false;
+                continue;
+            }
+
+            // The opponent's capturing reply overlooked (not a simple recapture).
+            bool missReply = false;
+            if (overlook > 0 && rm.pv.size() > 1)
+            {
+                const Move r = rm.pv[1];
+                const Square rt = r.to_sq();
+                const bool   captures =
+                  rt == rm.pv[0].from_sq() ? false
+                  : rt == rm.pv[0].to_sq() ? true
+                                           : pos.piece_on(rt) != NO_PIECE;
+                if (captures && !(pos.capture(rm.pv[0]) && rt == rm.pv[0].to_sq()))
+                {
+                    missReply = uniform() < (hard_to_see(pos.piece_on(r.from_sq()), r) ? overlook : overlook / 3);
+                }
+            }
+
+            const HumanView v = human_view(pos, rm, sight, missReply);
+            seenCp[i]         = UCIEngine::to_cp_normalized(v.seen, pos);
+            if (is_decisive(rm.score))
+            {
+                const int  plies = VALUE_MATE - std::abs(rm.score);  // the mating move is ply index plies - 1
+                const bool seen  = plies - 1 <= (missReply ? 0 : sight);
+                if (seen && is_loss(rm.score) && i != 0)
+                    ok[i] = false;
+                perceived[i] = seen ? (is_win(rm.score) ? 100000 - plies : -100000 + plies) : INT_MIN;
+                continue;
+            }
+            const int cp = UCIEngine::to_cp_normalized(rm.score, pos);
+            perceived[i] = cp - UCIEngine::to_cp_normalized(v.end - v.seen, pos);
+            posSum += cp - UCIEngine::to_cp_normalized(v.end, pos);
+            ++posCnt;
+        }
+        // An unseen mate looks like the material the player sees plus an average
+        // positional value of the other lines.
+        const int posAvg = posCnt ? posSum / posCnt : 0;
+        int       top    = INT_MIN;
+        for (usize i = 0; i < n; ++i)
+            if (ok[i])
+            {
+                if (perceived[i] == INT_MIN)
+                    perceived[i] = posAvg + seenCp[i];
+                top = std::max(top, perceived[i]);
+            }
+        if (top == INT_MIN)
+            return best;
+
+        const int maxDrop = max_drop();
+        double    w[MAX_MOVES], total = 0;
         for (usize i = 0; i < n; ++i)
         {
             w[i] = 0;
-            if (!allowed(pos, rootMoves, i, blind))
+            if (!ok[i] || top - perceived[i] > maxDrop)
                 continue;
-            const int drop = std::max(0, topCp - UCIEngine::to_cp_normalized(rootMoves[i].score, pos));
-            w[i]           = std::exp(-std::min(drop, 100000) / T);
+            w[i] = std::exp(-std::min(top - perceived[i], 100000) / T);
             total += w[i];
         }
-        double r = double(rng.rand<u64>() >> 11) * (1.0 / 9007199254740992.0) * total;
+        double r = uniform() * total;
         for (usize i = 0; i < n; ++i)
             if (w[i] > 0 && (r -= w[i]) < 0)
                 return best = rootMoves[i].pv[0];

@@ -75,7 +75,8 @@ std::string numa_policy_name(const Option& o) {
 // level, the earlier it leaves the book (book depth = fewest plies from the
 // start position): Pro all, Ama 9..7 20 plies, Ama 6..5 12, Ama 4..1 6,
 // Stu 3. Skill Level 0..19 (without a human rating): 15..19 20, 10..14 12,
-// 5..9 6, 0..4 3. 0: no book.
+// 5..9 6, 0..4 3. 0: no book. The choice follows a fixed repertoire, see
+// persona_seed.
 int book_max_depth(const OptionsMap& options) {
     if (const int elo = Search::Skill::human_elo(options))
         return elo >= 2280 ? 255 : elo >= 1800 ? 20 : elo >= 1450 ? 12 : elo >= 850 ? 6 : 3;
@@ -96,9 +97,29 @@ u64 book_hash(const Position& pos) {
     return (h ^ u64(pos.side_to_move() == BLACK)) * 0x100000001B3ULL;
 }
 
+// A fixed opening repertoire, as a human player has: the "Opening Persona" option
+// (0: a new random persona every time the engine starts) chooses for every book
+// position one move, at random in proportion to the book weights but always the
+// same for the same persona and position, so that the persona keeps its openings
+// from game to game (e.g. always the central cannon as red and the screen horses
+// against it). The persona's move is played 4 times in 5, otherwise any book
+// move in proportion to its weight.
+u64 persona_seed(const OptionsMap& options) {
+    static const u64 randomSeed = u64(now()) * 0x9E3779B97F4A7C15ULL | 1;
+    const int        persona    = int(options["Opening Persona"]);
+    return persona ? u64(persona) * 0xD1B54A32D192ED03ULL : randomSeed;
+}
+
+u64 mix64(u64 x) {  // SplitMix64 finaliser
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
 // A legal book move of the position at most maxDepth - 1 plies from the start,
-// chosen at random in proportion to its weight, else Move::none().
-Move book_move(const Position& pos, int maxDepth) {
+// the persona's move (see persona_seed) or, 1 time in 5, any book move chosen at
+// random in proportion to its weight; Move::none() if not in the book.
+Move book_move(const Position& pos, int maxDepth, u64 persona) {
     const u64   key = book_hash(pos);
     const auto* lo  = std::lower_bound(std::begin(Book::Entries), std::end(Book::Entries), key,
                                        [](const Book::Entry& e, u64 k) { return e.key < k; });
@@ -106,9 +127,9 @@ Move book_move(const Position& pos, int maxDepth) {
         return Move::none();
 
     const MoveList<ALL> legal(pos);
-    Move                  moves[64];
-    u32                   weights[64], total = 0;
-    usize                 n = 0;
+    Move                moves[64];
+    u32                 weights[64], total = 0;
+    usize               n = 0;
     for (const auto* e = lo; e != std::end(Book::Entries) && e->key == key && n < 64; ++e)
         if (legal.contains(Move(e->move)))
         {
@@ -120,7 +141,8 @@ Move book_move(const Position& pos, int maxDepth) {
         return Move::none();
 
     static PRNG rng(u64(now()) | 1);
-    u32         r = u32(rng.rand<u64>() % total);
+    const u64   roll = rng.rand<u64>();
+    u32         r    = u32((roll % 5 ? mix64(persona ^ key) : roll / 5) % total);
     for (usize i = 0; i < n; ++i)
         if (r < weights[i])
             return moves[i];
@@ -328,6 +350,10 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     options.add("TianTian Skill Level",
                 Option(Search::TianTian::combo().c_str(), "None"));
 
+    // Opening repertoire of the strength handicap's book moves: 1..9999 a fixed
+    // persona, 0 a new random one every time the engine starts (see book_move).
+    options.add("Opening Persona", Option(0, 0, 9999));
+
     options.add(  //
       "EvalFile", Option(EvalFileDefaultName " var " EvalFileDefaultName, EvalFileDefaultName,
                          [this](const Option&) {
@@ -401,7 +427,7 @@ void Engine::go(Search::LimitsType& limits) {
         && limits.searchmoves.empty()
         && (limits.use_time_management() || limits.movetime || limits.depth || limits.nodes))
         if (const int maxDepth = book_max_depth(options))
-            if (const Move m = book_move(pos, maxDepth))
+            if (const Move m = book_move(pos, maxDepth, persona_seed(options)))
             {
                 limits.searchmoves = {UCIEngine::move(m)};
                 limits.depth       = 1;
