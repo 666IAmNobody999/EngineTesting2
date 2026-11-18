@@ -293,33 +293,58 @@ constexpr int DrawPlayCaptureWeight = 2;
 AttackMode parse(const OptionsMap& options);
 }
 
+// Strength handicap. Skill Level (0..19) keeps the Stockfish formula. UCI_Elo
+// (with UCI_LimitStrength) and TianTian Skill Level use a human rating scale
+// instead: the Chinese Xiangqi Association rating scale (rapid standard values
+// 2550 GM, 2450 national master, 2350 CXA master, 2150 first class), with the
+// TianTian Xiangqi ranks placed on it (see TianTian::Elo). On that scale the
+// engine searches a limited number of nodes (so the strength does not depend on
+// the hardware or the time control) and picks among the MultiPV lines with a
+// probability falling with the score drop, the temperature rising as the rating
+// falls. From TianTian Ama 5-1 up it never gives material away; below that
+// rating it may hang pieces and miss mates as beginners do.
 struct Skill {
-    // Lowest and highest Elo ratings used in the skill level calculation
-    constexpr static int LowestElo  = 1280;
-    constexpr static int HighestElo = 3133;
+    // Range of the human rating scale of UCI_Elo
+    constexpr static int LowestElo  = 500;
+    constexpr static int HighestElo = 2850;
+    // Below this rating (TianTian Ama 5-1) blunders are possible
+    constexpr static int BlunderElo = 1450;
 
-    Skill(int skill_level, int uci_elo) {
-        if (uci_elo)
-        {
-            double e = double(uci_elo - LowestElo) / (HighestElo - LowestElo);
-            level = std::clamp((((37.2473 * e - 40.8525) * e + 22.2943) * e - 0.311438), 0.0, 19.0);
-        }
-        else
-            level = double(skill_level);
-    }
-    bool enabled() const { return level < 20.0; }
-    bool time_to_pick(Depth depth) const { return depth == 1 + int(level); }
-    // Largest score drop from the best move a handicapped engine may play:
-    // 2 pawns at level 0 down to about half a pawn at level 19, so it makes
-    // small mistakes but never gives a piece away.
-    int  max_drop() const { return int(PawnValue / 2 + PawnValue * 3 / 2 * (20 - level) / 20); }
-    bool allowed(const Position& pos, const RootMoves& rootMoves, usize i) const;
+    Skill(int skill_level, int human_elo) :
+        elo(human_elo),
+        level(human_elo ? 0.0 : double(skill_level)) {}
+
+    // Human rating from TianTian Skill Level, else UCI_Elo with UCI_LimitStrength, else 0
+    static int human_elo(const OptionsMap& options);
+    // Node budget per move of a human rating
+    static u64 human_nodes(int elo);
+    // MultiPV lines examined at a human rating
+    static usize human_multipv(int elo) { return elo < BlunderElo ? 8 : 5; }
+
+    bool enabled() const { return elo || level < 20.0; }
+    bool time_to_pick(Depth depth) const { return !elo && depth == 1 + int(level); }
+    // Largest score drop from the best move a handicapped engine may play
+    // (Skill Level: internal units, 2 pawns at level 0 down to about half a pawn
+    // at level 19; human rating: normalised centipawns).
+    int  max_drop() const;
+    bool allowed(const Position& pos, const RootMoves& rootMoves, usize i, bool blind = false) const;
     static bool recapture(const Position& pos, const RootMoves& rootMoves);
     Move pick_best(const Position& pos, const RootMoves& rootMoves, usize multiPV);
 
+    int    elo;
     double level;
     Move   best = Move::none();
 };
+
+namespace TianTian {
+// "TianTian Skill Level" combo values (None, then Pro3-3 down to Stu1-1) and
+// their ratings on the human scale of Skill.
+extern const char* const Names[45];
+extern const int         Elo[45];
+// Combo option string: "None var None var Pro3-3 ... var Stu1-1"
+std::string combo();
+}
+
 
 
 // LimitsType struct stores information sent by the caller about the analysis required.

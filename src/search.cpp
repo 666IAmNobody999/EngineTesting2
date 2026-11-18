@@ -237,7 +237,7 @@ void Search::Worker::start_searching() {
 
     Worker* bestThread = this;
     Skill   skill =
-      Skill(options["Skill Level"], options["UCI_LimitStrength"] ? int(options["UCI_Elo"]) : 0);
+      Skill(options["Skill Level"], Skill::human_elo(options));
 
     // With a strength handicap or in Forced Draw / Human-like mode the main
     // thread has already swapped its chosen move into rootMoves[0]; thread
@@ -317,12 +317,12 @@ bool Search::Worker::iterative_deepening() {
     }
 
     usize multiPV = usize(options["MultiPV"]);
-    Skill skill(options["Skill Level"], options["UCI_LimitStrength"] ? int(options["UCI_Elo"]) : 0);
+    Skill skill(options["Skill Level"], Skill::human_elo(options));
 
     // When playing with strength handicap enable MultiPV search that we will
     // use behind-the-scenes to retrieve a set of possible moves.
     if (skill.enabled())
-        multiPV = std::max(multiPV, usize(4));
+        multiPV = std::max(multiPV, skill.elo ? Skill::human_multipv(skill.elo) : usize(4));
 
     rootColor  = rootPos.side_to_move();
     attackMode = Attack::parse(options);
@@ -802,7 +802,7 @@ bool Search::Worker::iterative_deepening() {
         // out of the MultiPV lines, so its final score is unknown) choose again
         // from the final scores.
         const usize idx = usize(it - rootMoves.begin());
-        if (idx != 0
+        if (!skill.elo && idx != 0
             && (it == rootMoves.end() || idx >= multiPV || Skill::recapture(rootPos, rootMoves)
                 || !skill.allowed(rootPos, rootMoves, idx)))
         {
@@ -997,6 +997,84 @@ bool Search::Worker::iterative_deepening() {
 
 // When playing with strength handicap, choose the best move among a set of
 // RootMoves using a statistical rule dependent on 'level'. Idea by Heinz van Saanen.
+namespace {
+
+// Human rating scale of Skill: anchor ratings with their node budget per move,
+// the temperature of the move choice and the largest allowed score drop (both in
+// normalised centipawns), and the probability that a move is chosen "blind",
+// i.e. also among moves that hang a piece or walk into a mate (beginners only).
+// Linear interpolation in between (the node budget geometrically).
+struct HumanAnchor {
+    int    elo;
+    double nodes, temperature, maxDrop, blind;
+};
+constexpr HumanAnchor HumanAnchors[] = {
+  {500, 800, 400, 5000, 0.8}, {900, 2500, 150, 1000, 0.25}, {1200, 5000, 85, 400, 0.05},
+  {1450, 6000, 90, 300, 0},      {1800, 12000, 70, 220, 0},   {2150, 40000, 35, 140, 0},
+  {2450, 150000, 15, 70, 0},     {2850, 1000000, 4, 30, 0}};
+
+template<typename F>
+double human_param(int elo, F get, bool geometric = false) {
+    constexpr usize N = std::size(HumanAnchors);
+    if (elo <= HumanAnchors[0].elo)
+        return get(HumanAnchors[0]);
+    for (usize i = 1; i < N; ++i)
+        if (elo <= HumanAnchors[i].elo)
+        {
+            const HumanAnchor &lo = HumanAnchors[i - 1], &hi = HumanAnchors[i];
+            const double       t  = double(elo - lo.elo) / (hi.elo - lo.elo);
+            return geometric ? get(lo) * std::pow(get(hi) / get(lo), t)
+                             : get(lo) + (get(hi) - get(lo)) * t;
+        }
+    return get(HumanAnchors[N - 1]);
+}
+
+}  // namespace
+
+const char* const Search::TianTian::Names[45] = {
+  "Pro3-3", "Pro3-2", "Pro3-1", "Pro2-3", "Pro2-2", "Pro2-1", "Pro1-3", "Pro1-2", "Pro1-1",
+  "Ama9-3", "Ama9-2", "Ama9-1", "Ama8-3", "Ama8-2", "Ama8-1", "Ama7-3", "Ama7-2", "Ama7-1",
+  "Ama6-3", "Ama6-2", "Ama6-1", "Ama5-3", "Ama5-2", "Ama5-1", "Ama4-3", "Ama4-2", "Ama4-1",
+  "Ama3-3", "Ama3-2", "Ama3-1", "Ama2-3", "Ama2-2", "Ama2-1", "Ama1-3", "Ama1-2", "Ama1-1",
+  "Stu3-3", "Stu3-2", "Stu3-1", "Stu2-3", "Stu2-2", "Stu2-1", "Stu1-3", "Stu1-2", "Stu1-1"};
+
+// TianTian ranks on the CXA rating scale. Anchors from published comparisons:
+// Pro 3-1 ordinary master (~2450 national master), Pro 1-3 provincial champion
+// (~2350 CXA master), Pro 1-1 provincial level, Ama 9 county champion / first
+// class player (2150), Ama 8 city level (second class, 2000), Ama 5 the
+// beginner / club divide; the student ranks are below 800.
+const int Search::TianTian::Elo[45] = {
+  2550, 2510, 2470, 2440, 2410, 2380, 2340, 2310, 2280,  // Pro 3-3 .. Pro 1-1
+  2230, 2190, 2150, 2080, 2030, 1980, 1900, 1850, 1800,  // Ama 9-3 .. Ama 7-1
+  1740, 1680, 1620, 1570, 1510, 1450, 1400, 1350, 1300,  // Ama 6-3 .. Ama 4-1
+  1250, 1200, 1150, 1100, 1050, 1000, 950,  900,  850,   // Ama 3-3 .. Ama 1-1
+  790,  760,  730,  700,  670,  640,  610,  580,  550};  // Stu 3-3 .. Stu 1-1
+
+std::string Search::TianTian::combo() {
+    std::string s = "None var None";
+    for (const char* n : Names)
+        s += std::string(" var ") + n;
+    return s;
+}
+
+int Search::Skill::human_elo(const OptionsMap& options) {
+    const Option& t = options["TianTian Skill Level"];
+    for (usize i = 0; i < std::size(TianTian::Names); ++i)
+        if (t == TianTian::Names[i])
+            return TianTian::Elo[i];
+    return options["UCI_LimitStrength"] ? int(options["UCI_Elo"]) : 0;
+}
+
+u64 Search::Skill::human_nodes(int e) {
+    return u64(human_param(e, [](const HumanAnchor& a) { return a.nodes; }, true));
+}
+
+int Search::Skill::max_drop() const {
+    if (!elo)
+        return int(PawnValue / 2 + PawnValue * 3 / 2 * (20 - level) / 20);
+    return int(human_param(elo, [](const HumanAnchor& a) { return a.maxDrop; }));
+}
+
 // The opponent has just captured and the best move captures back (e.g. in the
 // middle of an exchange): a human always takes back, so no other move is played.
 bool Search::Skill::recapture(const Position& pos, const RootMoves& rootMoves) {
@@ -1008,12 +1086,20 @@ bool Search::Skill::recapture(const Position& pos, const RootMoves& rootMoves) {
 // (static exchange evaluation below zero), a move that the search shows to be
 // more than maxDrop() worse than the best one (e.g. it leaves another piece
 // hanging), or a move that gets mated. The best move is always allowed.
-bool Search::Skill::allowed(const Position& pos, const RootMoves& rootMoves, usize i) const {
+bool Search::Skill::allowed(const Position& pos, const RootMoves& rootMoves, usize i, bool blind) const {
     if (i == 0)
         return true;
     const RootMove& rm = rootMoves[i];
-    return rm.score != -VALUE_INFINITE && !is_loss(rm.score)
-        && rootMoves[0].score - rm.score <= max_drop() && pos.see_ge(rm.pv[0], 0);
+    if (rm.score == -VALUE_INFINITE)
+        return false;
+    const int drop = elo ? UCIEngine::to_cp_normalized(rootMoves[0].score, pos)
+                             - UCIEngine::to_cp_normalized(rm.score, pos)
+                         : int(rootMoves[0].score - rm.score);
+    if (drop > max_drop())
+        return false;
+    // A blind choice (beginners) may also hang a piece or walk into a mate, up
+    // to the drop limit, which widens as the rating falls.
+    return blind || (!is_loss(rm.score) && pos.see_ge(rm.pv[0], 0));
 }
 
 Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, usize multiPV) {
@@ -1024,6 +1110,32 @@ Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, u
 
     if (recapture(pos, rootMoves))
         return best;
+
+    // Human rating: choose among the allowed lines with a probability falling
+    // exponentially with the score drop (normalised centipawns).
+    if (elo)
+    {
+        const double T     = human_param(elo, [](const HumanAnchor& a) { return a.temperature; });
+        const double pBlind = human_param(elo, [](const HumanAnchor& a) { return a.blind; });
+        const bool   blind  = double(rng.rand<u64>() >> 11) * (1.0 / 9007199254740992.0) < pBlind;
+        const int    topCp = UCIEngine::to_cp_normalized(topScore, pos);
+        double       w[MAX_MOVES], total = 0;
+        usize        n = std::min(multiPV, rootMoves.size());
+        for (usize i = 0; i < n; ++i)
+        {
+            w[i] = 0;
+            if (!allowed(pos, rootMoves, i, blind))
+                continue;
+            const int drop = std::max(0, topCp - UCIEngine::to_cp_normalized(rootMoves[i].score, pos));
+            w[i]           = std::exp(-std::min(drop, 100000) / T);
+            total += w[i];
+        }
+        double r = double(rng.rand<u64>() >> 11) * (1.0 / 9007199254740992.0) * total;
+        for (usize i = 0; i < n; ++i)
+            if (w[i] > 0 && (r -= w[i]) < 0)
+                return best = rootMoves[i].pv[0];
+        return best;
+    }
 
     // RootMoves are already sorted by score in descending order. Only the best
     // move and the allowed alternatives (see Skill::allowed) are candidates.

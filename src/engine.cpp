@@ -263,6 +263,11 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     options.add("UCI_Elo",
                 Option(Search::Skill::LowestElo, Search::Skill::LowestElo, Search::Skill::HighestElo));
 
+    // TianTian Xiangqi rank to imitate (human rating scale, see Search::Skill);
+    // overrides UCI_LimitStrength / UCI_Elo and Skill Level. None: off.
+    options.add("TianTian Skill Level",
+                Option(Search::TianTian::combo().c_str(), "None"));
+
     options.add(  //
       "EvalFile", Option(EvalFileDefaultName " var " EvalFileDefaultName, EvalFileDefaultName,
                          [this](const Option&) {
@@ -327,6 +332,16 @@ void Engine::go(Search::LimitsType& limits) {
 
     choose_search_algorithm(limits);
     avoid_sixty_move_draw(limits);
+
+    // Human rating handicap: a fixed node budget per move, so that the strength
+    // does not depend on the hardware or the time control.
+    if (const int elo = Search::Skill::human_elo(options))
+    {
+        const u64 n = Search::Skill::human_nodes(elo);
+        if (!limits.nodes || limits.nodes > n)
+            limits.nodes = n;
+    }
+
     threads.start_thinking(pos, states, limits);
 }
 
