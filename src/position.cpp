@@ -2324,10 +2324,11 @@ Value Position::detect_sky_cycle(int d, int ply) {
         // Against a real perpetual chaser (common victim, no check):
         //  - the chaser changes when it had already chased twice before the
         //    alternation's first (pure) check;
-        //  - the alternating side changes when it had already played two check/chase
-        //    moves before the chase began;
-        //  - otherwise the chaser changes when more than one piece takes part in the
-        //    alternation (18 moves against 6), else the alternating side changes.
+        //  - when more than one piece takes part in the alternation (18 moves
+        //    instead of 12), the chaser changes unless the alternation began 6 or
+        //    more moves before the chase;
+        //  - otherwise the alternating side changes (棋例1: even if the chase began
+        //    one move earlier).
         if (!anyCheck[chaser] && victim)
         {
             load_ext();
@@ -2356,10 +2357,12 @@ Value Position::detect_sky_cycle(int d, int ply) {
 
             if (chasesBefore >= 2)
                 return loss_for(chaser ? BColor : AColor);
-            if (mixedBefore >= 2)
-                return loss_for(mixed ? BColor : AColor);
+            // More than one piece alternating may go on for 18 moves instead of 12,
+            // so it only exhausts its count first when it began 6 or more moves
+            // before the chase (棋例21: 3 moves, the chaser changes; 例29: 6 moves).
             if (ids & u16(ids - 1))
-                return loss_for(chaser ? BColor : AColor);
+                return loss_for(mixedBefore >= 6 ? (mixed ? BColor : AColor)
+                                                 : (chaser ? BColor : AColor));
         }
         return loss_for(mixed ? BColor : AColor);
     }
@@ -2433,15 +2436,14 @@ Value Position::detect_sky_cycle(int d, int ply) {
         const bool meet = (victims[0] & identities[1]) || (victims[1] & identities[0]);
 
         load_ext();
-        auto chain_oldest = [&](int side, u16 link) {
+        // Each chased piece has its own count, so a streak goes back while the
+        // same piece (a common victim of the cycle) is chased.
+        auto chain_oldest = [&](int side, u16 victim) {
             int oldest = -1;
             for (int i = side; i < total && sky_cached(all[i]) && !all[i]->checkersBB
-                               && (all[i]->skyVictims & link);
+                               && (all[i]->skyVictims & victim);
                  i += 2)
-            {
                 oldest = i;
-                link   = all[i]->skyVictims;
-            }
             return oldest;
         };
         const int oldA = chain_oldest(0, A), oldB = chain_oldest(1, B);
