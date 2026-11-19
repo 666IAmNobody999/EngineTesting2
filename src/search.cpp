@@ -1007,17 +1007,20 @@ namespace {
 // the probability that a beginner overlooks a capture by a cannon, a knight or
 // a rook from afar (other captures: a third of it; Ama 5-1 and up: never), and
 // the greed: how much (normalised centipawns) a weaker player overrates a
-// capture or a check of their own.
+// capture or a check of their own, the rashness: how much a player who is
+// clearly behind overrates an active move (capture, check, advance in the
+// opponent's half), and the habit: how much a player likes to move again the
+// piece they moved last (so the other pieces come out slowly).
 // Linear interpolation in between (the node budget geometrically).
 struct HumanAnchor {
     int    elo;
-    double nodes, temperature, maxDrop, sight, overlook, greed;
+    double nodes, temperature, maxDrop, sight, overlook, greed, rash, habit;
 };
 constexpr HumanAnchor HumanAnchors[] = {
-  {500, 300, 600, 5000, 1, 0.7, 80},       {900, 2500, 150, 1000, 1.3, 0.25, 50},
-  {1200, 5000, 85, 400, 2, 0.05, 30},      {1450, 6000, 90, 300, 2.5, 0, 15},
-  {1800, 12000, 70, 220, 3.5, 0, 0},       {2150, 60000, 28, 130, 5.5, 0, 0},
-  {2450, 250000, 10, 60, 7.5, 0, 0},       {2850, 1000000, 4, 30, 11, 0, 0}};
+  {500, 300, 600, 5000, 1, 0.7, 80, 0.6, 0.6},    {900, 2500, 150, 1000, 1.3, 0.25, 50, 0.7, 0.7},
+  {1200, 5000, 85, 400, 2, 0.05, 30, 0.6, 0.6},   {1450, 6000, 90, 300, 2.5, 0, 15, 0.5, 0.4},
+  {1800, 12000, 70, 220, 3.5, 0, 0, 0, 0},        {2150, 60000, 28, 130, 5.5, 0, 0, 0, 0},
+  {2450, 250000, 10, 60, 7.5, 0, 0, 0, 0},        {2850, 1000000, 4, 30, 11, 0, 0, 0, 0}};
 
 template<typename F>
 double human_param(int elo, F get, bool geometric = false) {
@@ -1191,6 +1194,15 @@ Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, u
         const double sightF   = human_param(elo, [](const HumanAnchor& a) { return a.sight; });
         const double overlook = human_param(elo, [](const HumanAnchor& a) { return a.overlook; });
         const double greed    = human_param(elo, [](const HumanAnchor& a) { return a.greed; });
+        const int    bestCp   = UCIEngine::to_cp_normalized(rootMoves[0].score, pos);
+        // Clearly behind (3 pawns): a weaker player gets rash and tries to
+        // turn the game around instead of defending.
+        const bool   behind   = !is_decisive(rootMoves[0].score) && bestCp <= -300;
+        const double rash     = behind ? T * human_param(elo, [](const HumanAnchor& a) { return a.rash; }) : 0;
+        const double habit    = T * human_param(elo, [](const HumanAnchor& a) { return a.habit; });
+        // Our previous move (habit: the same piece again, not straight back)
+        const StateInfo* prevSt = pos.state()->previous;
+        const Move       ourLast = prevSt ? prevSt->move : Move::none();
         const int    sight    = int(sightF + uniform());  // fractional part: sometimes one ply more
         const usize  n        = std::min(multiPV, rootMoves.size());
 
@@ -1262,8 +1274,21 @@ Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, u
             const int cp = UCIEngine::to_cp_normalized(rm.score, pos);
             perceived[i] = cp - UCIEngine::to_cp_normalized(v.end - v.seen, pos);
             // Greed: a weaker player likes to capture and to give check.
-            if (greed > 0 && (pos.capture(rm.pv[0]) || pos.gives_check(rm.pv[0])))
+            const bool capOrCheck = pos.capture(rm.pv[0]) || pos.gives_check(rm.pv[0]);
+            if (greed > 0 && capOrCheck)
                 perceived[i] += int(greed);
+            if (rash > 0)
+            {
+                const Square f = rm.pv[0].from_sq(), t = rm.pv[0].to_sq();
+                const Color  us = pos.side_to_move();
+                const int    rf = us == WHITE ? rank_of(f) : 9 - rank_of(f);
+                const int    rt = us == WHITE ? rank_of(t) : 9 - rank_of(t);
+                if (capOrCheck || (rt >= 5 && rt > rf))
+                    perceived[i] += int(rash);
+            }
+            if (habit > 0 && ourLast.is_ok() && rm.pv[0].from_sq() == ourLast.to_sq()
+                && rm.pv[0].to_sq() != ourLast.from_sq())
+                perceived[i] += int(habit);
             posSum += cp - UCIEngine::to_cp_normalized(v.end, pos);
             ++posCnt;
         }
@@ -1282,11 +1307,11 @@ Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, u
             return best;
 
         // Complacency: clearly ahead (3 pawns), a player below national master
-        // level relaxes and chooses less carefully.
-        const double Tc = elo < 2450 && !is_decisive(rootMoves[0].score)
-                              && UCIEngine::to_cp_normalized(rootMoves[0].score, pos) >= 300
-                            ? T * 1.5
-                            : T;
+        // level relaxes and chooses less carefully; clearly behind, a weaker
+        // player (below Ama 7-1) gets impatient and less careful too.
+        const double Tc = elo < 2450 && !is_decisive(rootMoves[0].score) && bestCp >= 300 ? T * 1.5
+                        : rash > 0                                                     ? T * 1.3
+                                                                                       : T;
         const int maxDrop = max_drop();
         double    w[MAX_MOVES], total = 0;
         for (usize i = 0; i < n; ++i)
