@@ -74,14 +74,11 @@ std::string numa_policy_name(const Option& o) {
 // strength handicap so that the opening looks like a human game. The weaker the
 // level, the earlier it leaves the book (book depth = fewest plies from the
 // start position): Pro all, Ama 9..7 20 plies, Ama 6..5 12, Ama 4..1 6,
-// Stu 3. Skill Level 0..19 (without a human rating): 15..19 20, 10..14 12,
-// 5..9 6, 0..4 3. 0: no book. The choice follows a fixed repertoire, see
-// persona_seed.
+// Stu 3 (Skill Level 0..19 by its rating, see Skill::human_elo). 0: no book.
+// The choice follows a fixed repertoire, see persona_seed.
 int book_max_depth(const OptionsMap& options) {
-    if (const int elo = Search::Skill::human_elo(options))
-        return elo >= 2280 ? 255 : elo >= 1800 ? 20 : elo >= 1450 ? 12 : elo >= 850 ? 6 : 3;
-    const int level = int(options["Skill Level"]);
-    return level >= 20 ? 0 : level >= 15 ? 20 : level >= 10 ? 12 : level >= 5 ? 6 : 3;
+    const int elo = Search::Skill::human_elo(options);
+    return !elo ? 0 : elo >= 2280 ? 255 : elo >= 1800 ? 20 : elo >= 1450 ? 12 : elo >= 850 ? 6 : 3;
 }
 
 // FNV-1a over the 90 squares (FEN letters, 0 for empty) and the side to move,

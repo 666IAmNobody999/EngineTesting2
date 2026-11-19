@@ -1005,17 +1005,19 @@ namespace {
 // perceived score (both in normalised centipawns), the sight (how many plies of
 // each line after the move a player of that rating follows, see human_view) and
 // the probability that a beginner overlooks a capture by a cannon, a knight or
-// a rook from afar (other captures: a third of it; Ama 5-1 and up: never).
+// a rook from afar (other captures: a third of it; Ama 5-1 and up: never), and
+// the greed: how much (normalised centipawns) a weaker player overrates a
+// capture or a check of their own.
 // Linear interpolation in between (the node budget geometrically).
 struct HumanAnchor {
     int    elo;
-    double nodes, temperature, maxDrop, sight, overlook;
+    double nodes, temperature, maxDrop, sight, overlook, greed;
 };
 constexpr HumanAnchor HumanAnchors[] = {
-  {500, 300, 600, 5000, 1, 0.7},      {900, 2500, 150, 1000, 1.3, 0.25},
-  {1200, 5000, 85, 400, 2, 0.05},     {1450, 6000, 90, 300, 2.5, 0},
-  {1800, 12000, 70, 220, 3.5, 0},     {2150, 40000, 35, 140, 5, 0},
-  {2450, 150000, 15, 70, 7, 0},       {2850, 1000000, 4, 30, 11, 0}};
+  {500, 300, 600, 5000, 1, 0.7, 80},       {900, 2500, 150, 1000, 1.3, 0.25, 50},
+  {1200, 5000, 85, 400, 2, 0.05, 30},      {1450, 6000, 90, 300, 2.5, 0, 15},
+  {1800, 12000, 70, 220, 3.5, 0, 0},       {2150, 60000, 28, 130, 5.5, 0, 0},
+  {2450, 250000, 10, 60, 7.5, 0, 0},       {2850, 1000000, 4, 30, 11, 0, 0}};
 
 template<typename F>
 double human_param(int elo, F get, bool geometric = false) {
@@ -1118,7 +1120,12 @@ int Search::Skill::human_elo(const OptionsMap& options) {
     for (usize i = 0; i < std::size(TianTian::Names); ++i)
         if (t == TianTian::Names[i])
             return TianTian::Elo[i];
-    return options["UCI_LimitStrength"] ? int(options["UCI_Elo"]) : 0;
+    if (options["UCI_LimitStrength"])
+        return int(options["UCI_Elo"]);
+    // Skill Level 0..19 on the same scale, evenly from 500 (level 0, about
+    // Stu 1-1) to 2850 (level 19); 20: full strength.
+    const int level = int(options["Skill Level"]);
+    return level < 20 ? LowestElo + (HighestElo - LowestElo) * level / 19 : 0;
 }
 
 u64 Search::Skill::human_nodes(int e) {
@@ -1170,17 +1177,20 @@ Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, u
     // (see human_view) is not seen, so a move that loses a piece to a deeper
     // combination looks fine, a winning combination deeper than the horizon is
     // not noticed, and a mate is seen only within the horizon. Beginners also
-    // overlook some captures, mostly by cannons, knights and far rooks, both
-    // the opponent's reply and their own chance to capture. From Ama 5-1 up a
-    // move that loses the exchange on its target square (SEE below zero) is
-    // never played, nor a mate that is seen. Among the remaining lines the
-    // choice falls exponentially with the drop of the perceived score.
+    // overlook some captures and checks, mostly by cannons, knights and far
+    // rooks, both the opponent's reply and their own chance to capture, and
+    // like to capture and to give check (greed). A move that loses the
+    // exchange on its target square (SEE below zero) is played less and less
+    // often from Ama 3-1 and never from Ama 5-1 up, nor a mate that is seen.
+    // Among the remaining lines the choice falls exponentially with the drop
+    // of the perceived score, less carefully when clearly ahead.
     if (elo)
     {
         auto uniform = [&] { return double(rng.rand<u64>() >> 11) * (1.0 / 9007199254740992.0); };
         const double T        = human_param(elo, [](const HumanAnchor& a) { return a.temperature; });
         const double sightF   = human_param(elo, [](const HumanAnchor& a) { return a.sight; });
         const double overlook = human_param(elo, [](const HumanAnchor& a) { return a.overlook; });
+        const double greed    = human_param(elo, [](const HumanAnchor& a) { return a.greed; });
         const int    sight    = int(sightF + uniform());  // fractional part: sometimes one ply more
         const usize  n        = std::min(multiPV, rootMoves.size());
 
@@ -1203,7 +1213,9 @@ Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, u
                 ok[i] = false;
                 continue;
             }
-            if (elo >= BlunderElo && i != 0 && !pos.see_ge(rm.pv[0], 0))
+            // Hanging a piece: less and less often from Ama 3-1, never from Ama 5-1.
+            if (i != 0 && !pos.see_ge(rm.pv[0], 0)
+                && (elo >= BlunderElo || uniform() < double(elo - 1150) / (BlunderElo - 1150)))
             {
                 ok[i] = false;
                 continue;
@@ -1219,7 +1231,18 @@ Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, u
                   rt == rm.pv[0].from_sq() ? false
                   : rt == rm.pv[0].to_sq() ? true
                                            : pos.piece_on(rt) != NO_PIECE;
-                if (captures && !(pos.capture(rm.pv[0]) && rt == rm.pv[0].to_sq()))
+                bool checks = false;
+                if (!captures)
+                {
+                    // A check by a cannon or a knight is as easy to overlook as
+                    // one of their captures (e.g. the cannon behind the knight).
+                    StateInfo si, si1;
+                    Position  p;
+                    p.set(pos.fen(), &si);
+                    p.do_move(rm.pv[0], si1, nullptr);
+                    checks = p.gives_check(r);
+                }
+                if ((captures && !(pos.capture(rm.pv[0]) && rt == rm.pv[0].to_sq())) || checks)
                 {
                     missReply = uniform() < (hard_to_see(pos.piece_on(r.from_sq()), r) ? overlook : overlook / 3);
                 }
@@ -1238,6 +1261,9 @@ Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, u
             }
             const int cp = UCIEngine::to_cp_normalized(rm.score, pos);
             perceived[i] = cp - UCIEngine::to_cp_normalized(v.end - v.seen, pos);
+            // Greed: a weaker player likes to capture and to give check.
+            if (greed > 0 && (pos.capture(rm.pv[0]) || pos.gives_check(rm.pv[0])))
+                perceived[i] += int(greed);
             posSum += cp - UCIEngine::to_cp_normalized(v.end, pos);
             ++posCnt;
         }
@@ -1255,6 +1281,12 @@ Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, u
         if (top == INT_MIN)
             return best;
 
+        // Complacency: clearly ahead (3 pawns), a player below national master
+        // level relaxes and chooses less carefully.
+        const double Tc = elo < 2450 && !is_decisive(rootMoves[0].score)
+                              && UCIEngine::to_cp_normalized(rootMoves[0].score, pos) >= 300
+                            ? T * 1.5
+                            : T;
         const int maxDrop = max_drop();
         double    w[MAX_MOVES], total = 0;
         for (usize i = 0; i < n; ++i)
@@ -1262,7 +1294,7 @@ Move Search::Skill::pick_best(const Position& pos, const RootMoves& rootMoves, u
             w[i] = 0;
             if (!ok[i] || top - perceived[i] > maxDrop)
                 continue;
-            w[i] = std::exp(-std::min(top - perceived[i], 100000) / T);
+            w[i] = std::exp(-std::min(top - perceived[i], 100000) / Tc);
             total += w[i];
         }
         double r = uniform() * total;

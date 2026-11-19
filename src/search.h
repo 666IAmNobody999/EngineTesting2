@@ -293,9 +293,9 @@ constexpr int DrawPlayCaptureWeight = 2;
 AttackMode parse(const OptionsMap& options);
 }
 
-// Strength handicap. Skill Level (0..19) keeps the Stockfish formula. UCI_Elo
-// (with UCI_LimitStrength) and TianTian Skill Level use a human rating scale
-// instead: the Chinese Xiangqi Association rating scale (rapid standard values
+// Strength handicap. TianTian Skill Level, UCI_Elo (with UCI_LimitStrength)
+// and Skill Level 0..19 (evenly 500..2850, see human_elo) use a human rating
+// scale: the Chinese Xiangqi Association rating scale (rapid standard values
 // 2550 GM, 2450 national master, 2350 CXA master, 2150 first class), with the
 // TianTian Xiangqi ranks placed on it (see TianTian::Elo). On that scale the
 // engine searches a limited number of nodes (so the strength does not depend on
@@ -304,9 +304,10 @@ AttackMode parse(const OptionsMap& options);
 // falls. The lines are judged as a human sees them: only a few plies deep
 // (deeper with the rating), so the errors are those of a human, a combination
 // beyond the horizon is missed and a deeper loss is not seen; beginners also
-// overlook captures, mostly by cannons, knights and far rooks. From TianTian
-// Ama 5-1 up a move that loses the exchange on its target square is never
-// played.
+// overlook captures and checks, mostly by cannons, knights and far rooks, like
+// to capture and to give check, and relax when clearly ahead. A move that
+// loses the exchange on its target square is played less and less often from
+// TianTian Ama 3-1, never from Ama 5-1 up.
 struct Skill {
     // Range of the human rating scale of UCI_Elo
     constexpr static int LowestElo  = 500;
@@ -318,12 +319,13 @@ struct Skill {
         elo(human_elo),
         level(human_elo ? 0.0 : double(skill_level)) {}
 
-    // Human rating from TianTian Skill Level, else UCI_Elo with UCI_LimitStrength, else 0
+    // Human rating from TianTian Skill Level, else UCI_Elo with UCI_LimitStrength,
+    // else Skill Level 0..19, else 0 (full strength)
     static int human_elo(const OptionsMap& options);
     // Node budget per move of a human rating
     static u64 human_nodes(int elo);
     // MultiPV lines examined at a human rating
-    static usize human_multipv(int elo) { return elo < BlunderElo ? 8 : 5; }
+    static usize human_multipv(int elo) { return elo < 1300 ? 8 : elo < BlunderElo ? 7 : 5; }
 
     bool enabled() const { return elo || level < 20.0; }
     bool time_to_pick(Depth depth) const { return !elo && depth == 1 + int(level); }
