@@ -17,18 +17,25 @@ jobs:
       # Released file name. The build itself uses an ASCII name (pikafish-build*)
       # so that make, Intel SDE and the PGO bench never see a non-ASCII path.
       EXE: 幻神商业引擎-${{ matrix.config.name }}-x86-64-universal${{ matrix.config.ext }}
-      # (not shipped); Windows embeds pikafish.nnue in
-      # the binary (Makefile embed=yes, the default for Windows), like Android.
+      # (not shipped); Windows and Linux embed pikafish.nnue in
+      # the binary (make embed=yes), like Android.
       NET_REPO: ${{ vars.NET_REPO }}
       NET_TAG: ${{ vars.NET_TAG }}
       NET_SHA256: ${{ vars.NET_SHA256 }}
     strategy:
+      fail-fast: false
       matrix:
         config:
           - name: Windows
             os: windows-latest
             shell: msys2 {0}
             ext: .exe
+          # Linux: Ubuntu 22.04 (glibc 2.35) so that the binary also runs on
+          # older distributions; libc++ is linked statically.
+          - name: Linux
+            os: ubuntu-22.04
+            shell: bash
+            ext: ''
     defaults:
       run:
         working-directory: src
@@ -46,7 +53,7 @@ jobs:
             echo "::error::NET_TOKEN secret, NET_REPO and NET_TAG variables are required for the PGO build."
             exit 1
           fi
-          NETS="pikafish.nnue"   # Windows: embedded in the binary; others: PGO training run only
+          NETS="pikafish.nnue"   # embedded in the binary
           gh release download "$NET_TAG" --repo "$NET_REPO" \
             $(for n in $NETS; do printf -- '--pattern %s ' "$n"; done) --dir . --clobber
           if [ -n "$NET_SHA256" ]; then
@@ -90,7 +97,8 @@ jobs:
             SDE="$SDE_PATH/sde64"
           fi
           BUILD=pikafish-build${{ matrix.config.ext }}
-          make -j4 profile-build EXE=$BUILD RUN_PREFIX="$SDE -future --"
+          # embed=yes: the net is embedded in the binary on every platform
+          make -j4 profile-build EXE=$BUILD embed=yes RUN_PREFIX="$SDE -future --"
           make strip EXE=$BUILD
           cp "$BUILD" "../$EXE"
 
