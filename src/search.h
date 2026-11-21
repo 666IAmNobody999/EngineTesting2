@@ -264,7 +264,9 @@ constexpr usize HumanMultiPV      = 6;
 constexpr int   HumanChance       = 5;
 // Pity timer: after HumanChance - 1 eligible moves in a row without a worse
 // move being played, the HumanChance-th eligible move skips the random roll
-// and always plays one (e.g. HumanChance 5: 4 misses, the 5th is forced).
+// and always plays one (e.g. HumanChance 5: 4 misses, the 5th is forced). When
+// no move is HumanMinDrop..HumanMaxDrop worse (or on a recapture) it is
+// postponed to the next eligible move, and so on until one fits.
 constexpr int   HumanMinAdvantage = 150;
 constexpr int   HumanMinDrop      = 50;
 constexpr int   HumanMaxDrop      = 150;
