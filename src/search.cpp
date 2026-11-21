@@ -973,8 +973,9 @@ bool Search::Worker::iterative_deepening() {
         // Pity timer: after HumanChance - 1 eligible moves in a row without a worse
         // move, the next eligible move skips the random roll. A move is only ever
         // played from the HumanMinDrop..HumanMaxDrop window; when none fits (or the
-        // move is a recapture, see below) the worse move is postponed: the counter
-        // is kept, so the next eligible move is forced again, until one fits.
+        // move is a recapture or one of our pieces hangs, see below) the worse move
+        // is postponed: the counter is kept, so the next eligible move is forced
+        // again, until one fits.
         int&       missed = main_manager()->humanMissed;
         const bool forced = missed >= Attack::HumanChance - 1;
         bool       played = false;
@@ -985,7 +986,30 @@ bool Search::Worker::iterative_deepening() {
         const bool recapture = rootPos.captured_piece() != NO_PIECE
                             && rootPos.capture(rootMoves[0].pv[0]);
 
-        if (bestCp > Attack::HumanMinAdvantage && !recapture
+        // Hanging piece: one of our pieces (not the king) is attacked and has no
+        // defender left once the attacker takes it (the attacker's square is
+        // vacated, so x-ray and cannon screens are seen correctly). A human
+        // saves the piece first, so no worse move is played and the forced move
+        // is postponed, as for a recapture.
+        auto hanging = [&]() {
+            const Color us   = rootPos.side_to_move();
+            Bitboard    ours = rootPos.pieces(us) ^ rootPos.pieces(us, KING);
+            while (ours)
+            {
+                const Square s   = pop_lsb(ours);
+                Bitboard     att = rootPos.attackers_to(s) & rootPos.pieces(~us);
+                while (att)
+                {
+                    const Bitboard occ = rootPos.pieces() ^ square_bb(pop_lsb(att));
+                    if (!(rootPos.attackers_to(s, occ) & rootPos.pieces(us)))
+                        return true;
+                }
+            }
+            return false;
+        };
+        const bool blocked = recapture || (bestCp > Attack::HumanMinAdvantage && hanging());
+
+        if (bestCp > Attack::HumanMinAdvantage && !blocked
             && (forced || rng.rand<unsigned>() % Attack::HumanChance == 0))
         {
             // A line not searched yet in the interrupted last iteration has no
@@ -1020,7 +1044,7 @@ bool Search::Worker::iterative_deepening() {
         // forced the counter just stays there until a worse move is played.
         if (played)
             missed = 0;
-        else if (bestCp > Attack::HumanMinAdvantage && !recapture && !forced)
+        else if (bestCp > Attack::HumanMinAdvantage && !blocked && !forced)
             ++missed;
     }
 
