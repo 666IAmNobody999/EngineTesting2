@@ -474,6 +474,8 @@ class SearchManager {
 
     // Human-like: eligible moves in a row on which no worse move was played
     int humanMissed = 0;
+    // Human-like: plies to mate of the mating line played on the last move, 0 if none
+    int humanMatePly = 0;
 
     const UpdateContext& updates;
 };

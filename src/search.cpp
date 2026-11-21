@@ -896,6 +896,57 @@ bool Search::Worker::iterative_deepening() {
         }
     }
 
+    // Human-like mate: when more than one searched root move mates, play one of
+    // them at random instead of always the shortest mate; with a single mating
+    // move it is simply played. Only proven mates take part (exact or lower bound
+    // scores, a line not searched yet in the interrupted last iteration uses its
+    // exact score of the previous iteration). To be sure the game still ends, a
+    // mate is never longer than the one chosen on the previous move minus the
+    // two plies played since (the mating line chosen then is still available).
+    // In the Bare King modes mates against a defended king are shaped into
+    // non-mate scores, so only real mate scores are randomised.
+    if (Attack::human_like(attackMode) && is_mainthread() && !skill.enabled())
+    {
+        int& lastMate = main_manager()->humanMatePly;
+
+        auto mate_score = [&](const RootMove& rm) {
+            if (rm.score != -VALUE_INFINITE)
+                return rm.inexactUpper ? -VALUE_INFINITE : rm.score;
+            return rm.previousScoreExact ? rm.previousScore : -VALUE_INFINITE;
+        };
+
+        const Value best = mate_score(rootMoves[0]);
+        if (best != -VALUE_INFINITE && is_win(best))
+        {
+            static PRNG rng(u64(now()) | 1);
+
+            const int bestPly = VALUE_MATE - best;
+            const int limit   = lastMate > 0 ? std::max(lastMate - 2, bestPly) : MAX_PLY;
+
+            usize cand[MAX_MOVES];
+            usize n = 0;
+            for (usize i = 0; i < multiPV; ++i)
+            {
+                const Value v = mate_score(rootMoves[i]);
+                if (v != -VALUE_INFINITE && is_win(v) && VALUE_MATE - v <= limit)
+                    cand[n++] = i;
+            }
+
+            const usize chosen = n > 1 ? cand[rng.rand<u64>() % n] : 0;
+            RootMove&   rm     = rootMoves[chosen];
+            lastMate           = VALUE_MATE - mate_score(rm);
+            if (chosen)
+            {
+                if (rm.score == -VALUE_INFINITE)  // keep a real score for the next move
+                    rm.score = rm.uciScore = rm.previousScore;
+                std::swap(rootMoves[0], rm);
+                uciPvSent = false;
+            }
+        }
+        else
+            lastMate = 0;
+    }
+
     // Human-like: when clearly ahead (best move above HumanMinAdvantage cp),
     // once in HumanChance moves play a searched root move that is between
     // HumanMinDrop and HumanMaxDrop cp worse than the best one, preferring the
@@ -1404,7 +1455,10 @@ void Search::Worker::undo_null_move(Position& pos) { pos.undo_null_move(); }
 // Reset histories, usually before a new game
 void Search::Worker::clear() {
     if (is_mainthread())
-        main_manager()->humanMissed = 0;
+    {
+        main_manager()->humanMissed  = 0;
+        main_manager()->humanMatePly = 0;
+    }
 
     mainHistory.fill(-5);
     captureHistory.fill(-604);
