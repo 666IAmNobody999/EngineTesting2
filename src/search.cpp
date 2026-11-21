@@ -973,9 +973,9 @@ bool Search::Worker::iterative_deepening() {
         // Pity timer: after HumanChance - 1 eligible moves in a row without a worse
         // move, the next eligible move skips the random roll. A move is only ever
         // played from the HumanMinDrop..HumanMaxDrop window; when none fits (or the
-        // move is a recapture or one of our pieces hangs, see below) the worse move
-        // is postponed: the counter is kept, so the next eligible move is forced
-        // again, until one fits.
+        // move is a recapture, or one of our pieces hangs and no fitting move saves
+        // it, see below) the worse move is postponed: the counter is kept, so the
+        // next eligible move is forced again, until one fits.
         int&       missed = main_manager()->humanMissed;
         const bool forced = missed >= Attack::HumanChance - 1;
         bool       played = false;
@@ -986,28 +986,38 @@ bool Search::Worker::iterative_deepening() {
         const bool recapture = rootPos.captured_piece() != NO_PIECE
                             && rootPos.capture(rootMoves[0].pv[0]);
 
-        // Hanging piece: one of our pieces (not the king) is attacked and has no
-        // defender left once the attacker takes it (the attacker's square is
-        // vacated, so x-ray and cannon screens are seen correctly). A human
-        // saves the piece first, so no worse move is played and the forced move
-        // is postponed, as for a recapture.
-        auto hanging = [&]() {
-            const Color us   = rootPos.side_to_move();
-            Bitboard    ours = rootPos.pieces(us) ^ rootPos.pieces(us, KING);
+        // Hanging piece: a piece of side `us` (not the king) is attacked and has
+        // no defender left once the attacker takes it (the attacker's square is
+        // vacated, so x-ray and cannon screens are seen correctly). When one of
+        // our pieces hangs, a human saves it first: only a worse move after which
+        // none of our pieces hangs any more (the piece moved away, defended, the
+        // attacker taken or blocked) may be played; when there is none the worse
+        // move is postponed, as for a recapture.
+        auto hanging = [](const Position& pos, Color us) {
+            Bitboard ours = pos.pieces(us) ^ pos.pieces(us, KING);
             while (ours)
             {
                 const Square s   = pop_lsb(ours);
-                Bitboard     att = rootPos.attackers_to(s) & rootPos.pieces(~us);
+                Bitboard     att = pos.attackers_to(s) & pos.pieces(~us);
                 while (att)
                 {
-                    const Bitboard occ = rootPos.pieces() ^ square_bb(pop_lsb(att));
-                    if (!(rootPos.attackers_to(s, occ) & rootPos.pieces(us)))
+                    const Bitboard occ = pos.pieces() ^ square_bb(pop_lsb(att));
+                    if (!(pos.attackers_to(s, occ) & pos.pieces(us)))
                         return true;
                 }
             }
             return false;
         };
-        const bool blocked = recapture || (bestCp > Attack::HumanMinAdvantage && hanging());
+        const bool blocked = recapture;
+        const bool hangs =
+          bestCp > Attack::HumanMinAdvantage && hanging(rootPos, rootPos.side_to_move());
+        auto still_hangs = [&](Move m) {
+            StateInfo st;
+            rootPos.do_move(m, st);
+            const bool h = hanging(rootPos, ~rootPos.side_to_move());
+            rootPos.undo_move(m);
+            return h;
+        };
 
         if (bestCp > Attack::HumanMinAdvantage && !blocked
             && (forced || rng.rand<unsigned>() % Attack::HumanChance == 0))
@@ -1023,7 +1033,8 @@ bool Search::Worker::iterative_deepening() {
                 if (v == -VALUE_INFINITE || is_decisive(v))
                     continue;
                 const int drop = bestCp - UCIEngine::to_cp_normalized(v, rootPos);
-                if (drop >= minDropCp && drop < minDrop)
+                if (drop >= minDropCp && drop < minDrop
+                    && !(hangs && still_hangs(rootMoves[i].pv[0])))
                 {
                     minDrop = drop;
                     chosen  = i;
