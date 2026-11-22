@@ -234,12 +234,6 @@ namespace Attack {
 constexpr Value AvoidRepetitionValue = 20000;
 // Avoid_Repetition applies only while the best score is at least this (cp).
 constexpr int AvoidRepetitionCp = 100;
-// Endgame_Keep_Pieces: active when each side has between one and this many
-// rooks, knights and cannons at the root, inside a +-KeepPiecesCp window.
-// Each remaining piece is worth up to KeepPiecesCp / KeepPiecesDiv cp (10 cp).
-constexpr int KeepPiecesMax = 2;
-constexpr int KeepPiecesCp  = 50;
-constexpr int KeepPiecesDiv = 5;
 // Which behaviours a mode switches on
 constexpr bool bare_king(AttackMode m) {
     return m == AttackMode::BARE_KING || m == AttackMode::HUMAN_LIKE_BARE_KING;
@@ -573,9 +567,6 @@ class Worker {
     AttackMode attackMode = AttackMode::BEST_MOVE;
     bool       avoidRepetition = false;
     bool       avoidRepetitionOpt = false;
-    Value      keepWindow = 0;  // Endgame_Keep_Pieces: 0 = off, else draw window (internal units)
-    Value      keep_pieces_eval(Value v, const Position& pos) const;
-    Value      keep_pieces_draw(const Position& pos) const;
 
     // Bare King helpers (see AttackMode). Both are no-ops in BEST_MOVE mode.
     Value attack_shape_eval(Value v, const Position& pos) const;

@@ -332,25 +332,6 @@ bool Search::Worker::iterative_deepening() {
     avoidRepetitionOpt = bool(options["Avoid_Repetition"]) && attackMode != AttackMode::FORCED_DRAW;
     avoidRepetition    = false;
 
-    // Endgame_Keep_Pieces: only when the root itself is already an endgame in
-    // which each side has one or two rooks / knights / cannons (four at most in
-    // total, so that exchanging into such an endgame is never rewarded), and
-    // never in Forced Draw.
-    keepWindow = 0;
-    if (bool(options["Endgame_Keep_Pieces"]) && attackMode != AttackMode::FORCED_DRAW)
-    {
-        const auto majors = [&](Color c) {
-            return rootPos.count<ROOK>(c) + rootPos.count<KNIGHT>(c) + rootPos.count<CANNON>(c);
-        };
-        const int w = majors(WHITE), b = majors(BLACK);
-        if (w >= 1 && w <= Attack::KeepPiecesMax && b >= 1 && b <= Attack::KeepPiecesMax)
-        {
-            // 50 cp (as shown to the GUI) in internal units for this material
-            const int cp = UCIEngine::to_cp_normalized(Value(10000), rootPos);
-            keepWindow   = Value(Attack::KeepPiecesCp * 10000 / std::max(cp, 1));
-        }
-    }
-
     // Forced Draw picks, among several root moves, the one closest to a draw.
     if (attackMode == AttackMode::FORCED_DRAW)
         multiPV = std::max(multiPV, Attack::DrawMultiPV);
@@ -1612,7 +1593,7 @@ Value Search::Worker::search(
             // check or evasion in the cycle is scored just short of a mate.
             if (ss->ply == 1 && avoidRepetition && pos.idle_repetition())
                 return Attack::AvoidRepetitionValue;
-            return keepWindow ? keep_pieces_draw(pos) : value_draw(nodes);
+            return value_draw(nodes);
         }
         if (result != VALUE_NONE)
         {
@@ -2492,8 +2473,6 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     {
         if (result == VALUE_DRAW && ss->ply == 1 && avoidRepetition && pos.idle_repetition())
             return Attack::AvoidRepetitionValue;
-        if (result == VALUE_DRAW && keepWindow)
-            return keep_pieces_draw(pos);
         return attack_shape_win(result, pos, ss->ply);
     }
     if (result != VALUE_NONE)
@@ -2709,42 +2688,7 @@ TimePoint Search::Worker::elapsed() const {
 Value Search::Worker::evaluate(const Position& pos) {
     Value v = Eval::evaluate(network[numaAccessToken], pos, accumulatorStack, refreshTable,
                              optimism[pos.side_to_move()]);
-    if (keepWindow)
-        v = keep_pieces_eval(v, pos);
     return Attack::bare_king(attackMode) ? attack_shape_eval(v, pos) : v;
-}
-
-
-// Endgame_Keep_Pieces: in a drawish endgame (|eval| below 50 cp) the root side
-// gets a small bonus for every rook / knight / cannon still on the board, so it
-// avoids exchanges that usually leave a dead draw, while the opponent is
-// modelled as a defender who wants them. The bonus fades out linearly towards
-// the edge of the window with slope at most 4/5 < 1, so the shaped value stays
-// monotonic in the NNUE evaluation and never inverts a real advantage.
-Value Search::Worker::keep_pieces_eval(Value v, const Position& pos) const {
-    const Color stm = pos.side_to_move();
-    const Value e   = stm == rootColor ? v : -v;  // root side's point of view
-    const Value a   = std::abs(e);
-    if (a >= keepWindow)
-        return v;
-
-    const int majors = pos.count<ROOK>() + pos.count<KNIGHT>() + pos.count<CANNON>();
-    const int bonus  = majors * (keepWindow - a) / Attack::KeepPiecesDiv;
-    return stm == rootColor ? v + bonus : v - bonus;
-}
-
-
-// Endgame_Keep_Pieces: a rule draw (repetition / natural-move limit) reached
-// with rooks / knights / cannons still on the board is scored for the root
-// side like a drawish position with one piece fewer. It stays below playing on
-// with every piece (so real progress is still preferred) but above a dead draw
-// after an exchange, so keeping the pieces and shuffling beats exchanging.
-Value Search::Worker::keep_pieces_draw(const Position& pos) const {
-    const int majors = pos.count<ROOK>() + pos.count<KNIGHT>() + pos.count<CANNON>();
-    if (majors < 2)
-        return VALUE_DRAW;
-    const int bonus = (majors - 1) * keepWindow / Attack::KeepPiecesDiv;
-    return pos.side_to_move() == rootColor ? Value(bonus) : Value(-bonus);
 }
 
 
