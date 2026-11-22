@@ -225,6 +225,11 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     options.add(  //
       "Avoid_Repetition", Option(true));
 
+    // Endgame_Keep_Pieces: in a drawish endgame (|score| < 50 cp) with at most
+    // two rooks / knights / cannons left in total, avoid exchanging them.
+    options.add(  //
+      "Endgame_Keep_Pieces", Option(true));
+
     // Avoid_Sixty_Move_Draw: when materially ahead and the natural-move limit is
     // a few plies away, only captures (or moves that offer the opponent a capture)
     // are searched, skipping those that lose by force or by more than 200 cp.
