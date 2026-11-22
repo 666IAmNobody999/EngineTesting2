@@ -575,6 +575,7 @@ class Worker {
     bool       avoidRepetitionOpt = false;
     Value      keepWindow = 0;  // Endgame_Keep_Pieces: 0 = off, else draw window (internal units)
     Value      keep_pieces_eval(Value v, const Position& pos) const;
+    Value      keep_pieces_draw(const Position& pos) const;
 
     // Bare King helpers (see AttackMode). Both are no-ops in BEST_MOVE mode.
     Value attack_shape_eval(Value v, const Position& pos) const;

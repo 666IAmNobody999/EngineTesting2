@@ -1612,7 +1612,7 @@ Value Search::Worker::search(
             // check or evasion in the cycle is scored just short of a mate.
             if (ss->ply == 1 && avoidRepetition && pos.idle_repetition())
                 return Attack::AvoidRepetitionValue;
-            return value_draw(nodes);
+            return keepWindow ? keep_pieces_draw(pos) : value_draw(nodes);
         }
         if (result != VALUE_NONE)
         {
@@ -2492,6 +2492,8 @@ Value Search::Worker::qsearch(Position& pos, Stack* ss, Value alpha, Value beta)
     {
         if (result == VALUE_DRAW && ss->ply == 1 && avoidRepetition && pos.idle_repetition())
             return Attack::AvoidRepetitionValue;
+        if (result == VALUE_DRAW && keepWindow)
+            return keep_pieces_draw(pos);
         return attack_shape_win(result, pos, ss->ply);
     }
     if (result != VALUE_NONE)
@@ -2729,6 +2731,20 @@ Value Search::Worker::keep_pieces_eval(Value v, const Position& pos) const {
     const int majors = pos.count<ROOK>() + pos.count<KNIGHT>() + pos.count<CANNON>();
     const int bonus  = majors * (keepWindow - a) / Attack::KeepPiecesDiv;
     return stm == rootColor ? v + bonus : v - bonus;
+}
+
+
+// Endgame_Keep_Pieces: a rule draw (repetition / natural-move limit) reached
+// with rooks / knights / cannons still on the board is scored for the root
+// side like a drawish position with one piece fewer. It stays below playing on
+// with every piece (so real progress is still preferred) but above a dead draw
+// after an exchange, so keeping the pieces and shuffling beats exchanging.
+Value Search::Worker::keep_pieces_draw(const Position& pos) const {
+    const int majors = pos.count<ROOK>() + pos.count<KNIGHT>() + pos.count<CANNON>();
+    if (majors < 2)
+        return VALUE_DRAW;
+    const int bonus = (majors - 1) * keepWindow / Attack::KeepPiecesDiv;
+    return pos.side_to_move() == rootColor ? Value(bonus) : Value(-bonus);
 }
 
 
