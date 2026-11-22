@@ -332,15 +332,18 @@ bool Search::Worker::iterative_deepening() {
     avoidRepetitionOpt = bool(options["Avoid_Repetition"]) && attackMode != AttackMode::FORCED_DRAW;
     avoidRepetition    = false;
 
-    // Endgame_Keep_Pieces: only when the root itself is already an endgame with
-    // at most two rooks / knights / cannons in total (so that exchanging into
-    // such an endgame is never rewarded), and never in Forced Draw.
+    // Endgame_Keep_Pieces: only when the root itself is already an endgame in
+    // which each side has one or two rooks / knights / cannons (four at most in
+    // total, so that exchanging into such an endgame is never rewarded), and
+    // never in Forced Draw.
     keepWindow = 0;
     if (bool(options["Endgame_Keep_Pieces"]) && attackMode != AttackMode::FORCED_DRAW)
     {
-        const int majors =
-          rootPos.count<ROOK>() + rootPos.count<KNIGHT>() + rootPos.count<CANNON>();
-        if (majors >= 1 && majors <= Attack::KeepPiecesMax)
+        const auto majors = [&](Color c) {
+            return rootPos.count<ROOK>(c) + rootPos.count<KNIGHT>(c) + rootPos.count<CANNON>(c);
+        };
+        const int w = majors(WHITE), b = majors(BLACK);
+        if (w >= 1 && w <= Attack::KeepPiecesMax && b >= 1 && b <= Attack::KeepPiecesMax)
         {
             // 50 cp (as shown to the GUI) in internal units for this material
             const int cp = UCIEngine::to_cp_normalized(Value(10000), rootPos);
@@ -2714,7 +2717,7 @@ Value Search::Worker::evaluate(const Position& pos) {
 // gets a small bonus for every rook / knight / cannon still on the board, so it
 // avoids exchanges that usually leave a dead draw, while the opponent is
 // modelled as a defender who wants them. The bonus fades out linearly towards
-// the edge of the window with slope 2/5 < 1, so the shaped value stays
+// the edge of the window with slope at most 4/5 < 1, so the shaped value stays
 // monotonic in the NNUE evaluation and never inverts a real advantage.
 Value Search::Worker::keep_pieces_eval(Value v, const Position& pos) const {
     const Color stm = pos.side_to_move();

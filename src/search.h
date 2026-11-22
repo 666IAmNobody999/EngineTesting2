@@ -234,8 +234,8 @@ namespace Attack {
 constexpr Value AvoidRepetitionValue = 20000;
 // Avoid_Repetition applies only while the best score is at least this (cp).
 constexpr int AvoidRepetitionCp = 100;
-// Endgame_Keep_Pieces: active when the root has at most this many rooks,
-// knights and cannons in total (both sides), inside a +-KeepPiecesCp window.
+// Endgame_Keep_Pieces: active when each side has between one and this many
+// rooks, knights and cannons at the root, inside a +-KeepPiecesCp window.
 // Each remaining piece is worth up to KeepPiecesCp / KeepPiecesDiv cp (10 cp).
 constexpr int KeepPiecesMax = 2;
 constexpr int KeepPiecesCp  = 50;

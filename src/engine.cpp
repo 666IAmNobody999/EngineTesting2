@@ -225,8 +225,8 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     options.add(  //
       "Avoid_Repetition", Option(true));
 
-    // Endgame_Keep_Pieces: in a drawish endgame (|score| < 50 cp) with at most
-    // two rooks / knights / cannons left in total, avoid exchanging them.
+    // Endgame_Keep_Pieces: in a drawish endgame (|score| < 50 cp) in which each
+    // side has one or two rooks / knights / cannons left, avoid exchanging them.
     options.add(  //
       "Endgame_Keep_Pieces", Option(true));
 
