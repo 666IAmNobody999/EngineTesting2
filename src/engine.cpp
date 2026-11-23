@@ -606,11 +606,25 @@ void Engine::king_probe_run(Search::LimitsType limits) {
     const auto                              savedUpdates = updateContext;
     std::atomic<bool>                       done{false};
     updateContext.onUpdateNoMoves = [](const InfoShort&) {};
-    // A probe that already sees a mate for us ends at once (it cannot get better).
-    std::atomic<bool> probeMate{false};
+    // A probe ends at once when it sees a mate for us, or a score of at least
+    // WinCp for us (exact, two iterations in a row): that square becomes the
+    // target and the other squares are not probed.
+    std::atomic<bool> probeMate{false};  // set when the probe can end
+    const Position*   probePos  = nullptr;
+    int               goodDepth = 0, goodCount = 0;
     updateContext.onUpdateFull = [&](const InfoFull& i) {
-        if (i.multiPV == 1 && i.bound.empty() && i.score.is<Score::Mate>()
-            && i.score.get<Score::Mate>().plies < 0)
+        if (i.multiPV != 1 || !i.bound.empty())
+            return;
+        bool good;
+        if (i.score.is<Score::Mate>())
+            good = i.score.get<Score::Mate>().plies < 0;
+        else
+            good = probePos && -UCIEngine::to_cp_normalized(i.value, *probePos) >= WinCp;
+        if (!good)
+            goodCount = 0;
+        else if (i.depth > goodDepth)
+            goodDepth = i.depth, ++goodCount;
+        if (good && (i.score.is<Score::Mate>() || goodCount >= 2))
             probeMate = true;
     };
     updateContext.onIter          = [](const InfoIter&) {};
@@ -667,9 +681,10 @@ void Engine::king_probe_run(Search::LimitsType limits) {
         const TimePoint own = ownLeft();
         pl.movetime = own < 0 ? probeMs : std::clamp(own / left, TimePoint(1000), probeMs);
         done = false, probeMate = false;
+        probePos = &p, goodDepth = goodCount = 0;
         threads.start_thinking(p, st, pl);
         bool stopped = false;
-        int  ticks   = 0;
+        TimePoint lastInfo = now();
         while (!done)
         {
             std::this_thread::sleep_for(2ms);
@@ -677,8 +692,8 @@ void Engine::king_probe_run(Search::LimitsType limits) {
                 threads.stop = stopped = true;
             else if (probeMate)
                 threads.stop = true;
-            if (++ticks % 500 == 0)
-                progress(probeNodes + threads.nodes_searched());
+            if (now() - lastInfo >= 1000)
+                lastInfo = now(), progress(probeNodes + threads.nodes_searched());
         }
         threads.main_thread()->wait_for_search_finished();
         probeNodes += threads.nodes_searched();
@@ -710,8 +725,8 @@ void Engine::king_probe_run(Search::LimitsType limits) {
         progress(probeNodes);
         if (cp > best)
             best = cp, target = s;
-        if (best >= 100000)
-            break;  // a mate for us: no other square can do better
+        if (best >= WinCp)
+            break;  // a winning square: the target, no need to probe the others
     }
     if (target != SQ_NONE && best < WinCp)
         target = SQ_NONE;

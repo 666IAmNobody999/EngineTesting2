@@ -461,6 +461,7 @@ struct InfoFull: InfoShort {
     usize            tbHits;
     std::string_view pv;
     int              hashfull;
+    Value            value;  // internal score (side to move), for King_Probe
 };
 
 struct InfoIteration {

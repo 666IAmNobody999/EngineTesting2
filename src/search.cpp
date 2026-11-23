@@ -2987,6 +2987,7 @@ void SearchManager::output_pv(Search::Worker&           worker,
         info.selDepth = rootMoves[i].selDepth;
         info.multiPV  = i + 1;
         info.score    = {v, pos};
+        info.value    = v;
         info.wdl      = wdl;
 
         // Previous scores are exact, even though their flags may say otherwise
