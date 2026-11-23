@@ -152,6 +152,16 @@ Option& Option::operator=(const std::string& v) {
 
     assert(!type.empty());
 
+    // check: also accept True / FALSE ... from GUIs that do not send lower case
+    if (type == "check" && (v.size() == 4 || v.size() == 5))
+    {
+        std::string lower = v;
+        for (char& c : lower)
+            c = char(std::tolower(static_cast<unsigned char>(c)));
+        if (lower != v && (lower == "true" || lower == "false"))
+            return *this = lower;
+    }
+
     if ((type != "button" && type != "string" && v.empty())
         || (type == "check" && v != "true" && v != "false")
         || (type == "spin" && !value_in_range(v, min, max)))

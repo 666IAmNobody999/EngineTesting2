@@ -244,7 +244,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     // except 0-1 s per move and games of at most 5 minutes (any increment).
     // Off: the search is exactly the usual one.
     options.add(  //
-      "King_Probe", Option(true));
+      "King_Probe", Option(false));
 
     options.add(  //
       "Repetition Rule",
