@@ -28,6 +28,8 @@
 #include <string_view>
 #include <utility>
 #include <variant>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "misc.h"
@@ -125,6 +127,10 @@ class Engine {
     void avoid_sixty_move_draw(Search::LimitsType& limits);
     void choose_search_algorithm(Search::LimitsType& limits);
     void new_game_state();
+    // King_Probe (帥位試探, see Search::KingProbe)
+    bool king_probe_eligible(const Search::LimitsType& limits) const;
+    void king_probe_run(Search::LimitsType limits);
+    void king_probe_join();
     const std::filesystem::path binaryDirectory;
 
     NumaReplicationContext numaContext;
@@ -147,6 +153,24 @@ class Engine {
     bool      gamePonder   = false;  // a go ponder was received in this game
     bool      sixtyFastGame = false;  // 0-1 s per move, 1 min + 0 game or analysis
     int       gameLastPly  = -1;
+
+    // King_Probe: allowed by the time control of this go (analysis, or Ponder
+    // on except 0-1 s per move and games of at most 5 minutes)
+    bool        kingProbeTimeOk = false;
+    std::thread kpThread;          // probes, then starts the real search
+    std::mutex  kpMutex;
+    bool        kpProbing   = false;  // the real search has not started yet
+    bool        kpAbort     = false;  // stop / position received while probing
+    bool        kpPonderhit = false;  // ponderhit received while probing
+    TimePoint   kpPonderhitTime = 0;
+    // Last result, reused while the material stays the same
+    bool   kpCached    = false;
+    Color  kpCacheUs   = WHITE;
+    u64    kpCacheMat  = 0;
+    Square kpCacheSq   = SQ_NONE;  // SQ_NONE: no target found
+    int    kpCacheSkip = 0;        // searches left before probing again after a miss
+    bool   kpPrevValid = false;    // side to move of the previous search
+    Color  kpPrevUs    = WHITE;
 };
 
 }  // namespace Stockfish

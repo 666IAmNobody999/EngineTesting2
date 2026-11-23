@@ -216,6 +216,42 @@ enum class SearchAlgorithm {
 
 struct LimitsType;
 
+// King_Probe (帥位試探): in an endgame with at most 4 rooks, knights and cannons
+// on the board, the engine (see Engine::go) first puts its own king on every
+// free palace square, with the opponent to move, and runs a short search on
+// each. The square that wins most clearly becomes the target (no probe when the
+// previous search for this side already saw a win); the real search then adds
+// a small bonus for the root side, as long as
+// no rook / knight / cannon has left the board since the root, which grows as
+// the king gets closer to the target. Inactive otherwise (no cost).
+namespace KingProbe {
+constexpr Value Keep   = 20;   // pieces kept (no rook / knight / cannon exchanged)
+constexpr Value Step   = 24;   // per palace step closer to the target (4 steps at most)
+constexpr Value Window = 450;  // only while the evaluation is within this (internal units)
+constexpr int   MaxMajors = 4; // rooks + knights + cannons of both sides
+constexpr int   WinCp     = 200;  // a probe at or above this (cp, Elo score type) wins
+constexpr TimePoint ProbeMs = 10000;  // search time per square (less on the own clock)
+
+// Counts of rooks, knights and cannons of each side, 2 bits each.
+inline u32 major_sig(const Position& pos) {
+    return u32(pos.count<ROOK>(WHITE)) | u32(pos.count<KNIGHT>(WHITE)) << 2
+         | u32(pos.count<CANNON>(WHITE)) << 4 | u32(pos.count<ROOK>(BLACK)) << 6
+         | u32(pos.count<KNIGHT>(BLACK)) << 8 | u32(pos.count<CANNON>(BLACK)) << 10;
+}
+inline int majors(const Position& pos) {
+    return pos.count<ROOK>() + pos.count<KNIGHT>() + pos.count<CANNON>();
+}
+
+struct Target {
+    bool   active = false;
+    Color  us     = WHITE;
+    Square sq     = SQ_NONE;
+    u32    sig    = 0;
+};
+// Set by the engine before a search starts, read by every thread at its start.
+extern Target current;
+}
+
 namespace Improved {
 constexpr Depth AltMaxDepthV3  = 20;   // depth cap of the extra lines (Improved MultiPV 3)
 constexpr Depth AltMaxDepthV2  = 20;   // depth cap of the extra line (Improved MultiPV 2)
@@ -376,6 +412,7 @@ struct LimitsType {
     u64                      nodes;
     bool                     ponderMode;
     bool                     forceImproved;  // bench: no info string Search Algorithm
+    bool                     kingProbe = false;  // King_Probe search: no info string either
     SearchAlgorithm          algo;           // chosen by Engine::go()
     const char*              algoReason;     // why (info string), nullptr in bench
     // Avoid_Sixty_Move_Draw: searchmoves holds its first tier (captures or offers);
@@ -500,6 +537,9 @@ class Worker {
 
     void ensure_network_replicated();
 
+    // Score of the best root move once the search is over (King_Probe).
+    Value best_root_score() const { return rootMoves.empty() ? VALUE_NONE : rootMoves[0].score; }
+
     // Public because they need to be updatable by the stats
     ButterflyHistory mainHistory;
     LowPlyHistory    lowPlyHistory;
@@ -567,6 +607,12 @@ class Worker {
     AttackMode attackMode = AttackMode::BEST_MOVE;
     bool       avoidRepetition = false;
     bool       avoidRepetitionOpt = false;
+    // King_Probe target of this search (see KingProbe)
+    bool       kpActive = false;
+    Square     kpTarget = SQ_NONE;
+    u32        kpSig    = 0;
+    bool       evalShaping = false;  // King_Probe or Bare King reshape the evaluation
+    Value      king_probe_shape(Value v, const Position& pos) const;
 
     // Bare King helpers (see AttackMode). Both are no-ops in BEST_MOVE mode.
     Value attack_shape_eval(Value v, const Position& pos) const;

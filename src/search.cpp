@@ -327,6 +327,10 @@ bool Search::Worker::iterative_deepening() {
 
     rootColor  = rootPos.side_to_move();
     attackMode = Attack::parse(options);
+    kpActive   = KingProbe::current.active && KingProbe::current.us == rootColor;
+    kpTarget   = KingProbe::current.sq;
+    kpSig      = KingProbe::current.sig;
+    evalShaping = kpActive || Attack::bare_king(attackMode);
     // Forced Draw looks for draws on purpose, so it keeps repetitions.
     // The other modes avoid a repetition only while clearly better (see below).
     avoidRepetitionOpt = bool(options["Avoid_Repetition"]) && attackMode != AttackMode::FORCED_DRAW;
@@ -356,7 +360,7 @@ bool Search::Worker::iterative_deepening() {
     const bool  altRotate = true;
 
     // Tell the GUI which search is actually used for this go (not in bench).
-    if (is_mainthread() && !limits.forceImproved)
+    if (is_mainthread() && !limits.forceImproved && !limits.kingProbe)
         sync_cout << "info string Search Algorithm: "
                   << (!altLine                                      ? "Original"
                       : algo == SearchAlgorithm::IMPROVED_MULTIPV3 ? "ImprovedMultiPV3"
@@ -2688,8 +2692,27 @@ TimePoint Search::Worker::elapsed() const {
 Value Search::Worker::evaluate(const Position& pos) {
     Value v = Eval::evaluate(network[numaAccessToken], pos, accumulatorStack, refreshTable,
                              optimism[pos.side_to_move()]);
+    if (!evalShaping) [[likely]]
+        return v;
+    if (kpActive)
+        v = king_probe_shape(v, pos);
     return Attack::bare_king(attackMode) ? attack_shape_eval(v, pos) : v;
 }
+
+
+// King_Probe: bonus for the root side while no rook / knight / cannon has left
+// the board since the root, growing as its king gets closer to the target.
+Value Search::Worker::king_probe_shape(Value v, const Position& pos) const {
+    if (std::abs(v) > KingProbe::Window || KingProbe::major_sig(pos) != kpSig)
+        return v;
+    const Square k = pos.king_square(rootColor);
+    const int    d = std::abs(int(file_of(k)) - int(file_of(kpTarget)))
+                + std::abs(int(rank_of(k)) - int(rank_of(kpTarget)));
+    const Value  b = KingProbe::Keep + KingProbe::Step * std::max(0, 4 - d);
+    return pos.side_to_move() == rootColor ? v + b : v - b;
+}
+
+Search::KingProbe::Target Search::KingProbe::current;
 
 
 AttackMode Search::Attack::parse(const OptionsMap& options) {

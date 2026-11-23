@@ -24,6 +24,7 @@
 #include <deque>
 #include <initializer_list>
 #include <iostream>
+#include <chrono>
 #include <memory>
 #include <sstream>
 #include <string_view>
@@ -236,6 +237,15 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     options.add(  //
       "Avoid_Sixty_Move_Draw", Option(false));
 
+    // King_Probe (帥位試探): with at most 4 rooks, knights and cannons on the board,
+    // first try the own king on every free palace square (opponent to move, a
+    // short search each) and steer the search towards a square that wins, while
+    // keeping the rooks, knights and cannons. Only in analysis, or with Ponder on
+    // except 0-1 s per move and games of at most 5 minutes (any increment).
+    // Off: the search is exactly the usual one.
+    options.add(  //
+      "King_Probe", Option(true));
+
     options.add(  //
       "Repetition Rule",
       Option("AsianRule var AsianRule var SkyRule var QiZheRule var YiTianRule var ChineseRule var ComputerRule",
@@ -402,6 +412,7 @@ std::variant<u64, PositionSetError> Engine::perft(const std::string& fen, Depth 
 
 void Engine::go(Search::LimitsType& limits) {
     assert(limits.perft == 0);
+    king_probe_join();
     verify_network();
     force_process_priority();  // re-assert in case the GUI changed it after launch
 
@@ -439,6 +450,291 @@ void Engine::go(Search::LimitsType& limits) {
             limits.nodes = n;
     }
 
+    Search::KingProbe::current.active = false;
+    if (king_probe_eligible(limits))
+    {
+        {
+            std::lock_guard<std::mutex> lk(kpMutex);
+            kpProbing = true, kpAbort = kpPonderhit = false;
+        }
+        kpThread = std::thread([this, limits]() { king_probe_run(limits); });
+        return;
+    }
+
+    kpPrevValid = !limits.forceImproved, kpPrevUs = pos.side_to_move();
+    threads.start_thinking(pos, states, limits);
+}
+
+// King_Probe: only for the own king of a side with at least one rook, knight or
+// cannon, at most 4 of them on the board, not in check, and a plain search
+// (no strength handicap, no searchmoves, not Forced Draw).
+bool Engine::king_probe_eligible(const Search::LimitsType& limits) const {
+    if (!kingProbeTimeOk || !bool(options["King_Probe"]) || limits.forceImproved
+        || !limits.searchmoves.empty() || limits.sixtyGuard || !states.get())
+        return false;
+    if (int(options["Skill Level"]) < 20 || Search::Skill::human_elo(options)
+        || options["Attack Mode"] == "ForcedDraw")
+        return false;
+    const Color us = pos.side_to_move();
+    return !pos.checkers() && Search::KingProbe::majors(pos) <= Search::KingProbe::MaxMajors
+        && pos.count<ROOK>(us) + pos.count<KNIGHT>(us) + pos.count<CANNON>(us) > 0;
+}
+
+void Engine::king_probe_join() {
+    if (kpThread.joinable() && kpThread.get_id() != std::this_thread::get_id())
+        kpThread.join();
+}
+
+namespace {
+
+// The position with the king of `us` moved from `from` to `to`, opponent to move.
+std::string king_probe_fen(const Position& pos, Color us, Square from, Square to) {
+    std::string        fen = pos.fen(), board = fen.substr(0, fen.find(' '));
+    std::vector<char>  grid(90, '.');
+    int                row = 0, col = 0;
+    for (char c : board)
+        if (c == '/')
+            ++row, col = 0;
+        else if (c >= '1' && c <= '9')
+            col += c - '0';
+        else
+            grid[row * 9 + col++] = c;
+    auto at = [&](Square s) -> char& { return grid[(9 - int(rank_of(s))) * 9 + int(file_of(s))]; };
+    if (to != from)
+        at(to) = at(from), at(from) = '.';
+    std::string out;
+    for (int r = 0; r < 10; ++r)
+    {
+        int empty = 0;
+        for (int f = 0; f < 9; ++f)
+            if (grid[r * 9 + f] == '.')
+                ++empty;
+            else
+            {
+                if (empty)
+                    out += char('0' + empty), empty = 0;
+                out += grid[r * 9 + f];
+            }
+        if (empty)
+            out += char('0' + empty);
+        if (r < 9)
+            out += '/';
+    }
+    return out + (us == WHITE ? " b - - 0 1" : " w - - 0 1");
+}
+
+u64 king_probe_material(const Position& pos) {
+    u64 m = 0;
+    for (Color c : {WHITE, BLACK})
+        for (PieceType pt : {ROOK, ADVISOR, CANNON, PAWN, KNIGHT, BISHOP})
+            m = m * 8 + u64(popcount(pos.pieces(c, pt)));
+    return m;
+}
+
+}  // namespace
+
+// Runs on its own thread so that the UCI loop stays responsive: probes each
+// palace square with the normal (multi-threaded) search, output silenced, then
+// starts the real search with the target, if any.
+void Engine::king_probe_run(Search::LimitsType limits) {
+    using namespace std::chrono_literals;
+    using Search::KingProbe::WinCp;
+
+    const Color  us  = pos.side_to_move();
+    const Square ksq = pos.king_square(us);
+    const u64    mat = king_probe_material(pos);
+    const bool   analysis = limits.infinite
+                       || (!limits.use_time_management() && !limits.movetime && !limits.depth
+                           && !limits.nodes && !limits.mate);
+
+    // 10 s per square: a fixed depth of 20 (0.1 s each here) was far too shallow
+    // to tell the winning square in the test endgame.
+    const TimePoint probeMs = Search::KingProbe::ProbeMs;
+
+    // Own clock budget for all the probes (game moves, also after a ponderhit).
+    const TimePoint budget = limits.movetime ? limits.movetime / 3
+                           : limits.use_time_management()
+                             ? limits.time[us] / 60 + limits.inc[us] / 2
+                             : 0;
+
+    std::vector<Square> squares;
+    const Rank r0 = us == WHITE ? RANK_0 : RANK_7;
+    for (int r = r0; r <= r0 + 2; ++r)
+        for (int f = FILE_D; f <= FILE_F; ++f)
+        {
+            const Square s = make_square(File(f), Rank(r));
+            if (pos.empty(s))
+                squares.push_back(s);
+        }
+    auto dist = [](Square a, Square b) {
+        return std::abs(int(file_of(a)) - int(file_of(b)))
+             + std::abs(int(rank_of(a)) - int(rank_of(b)));
+    };
+    std::stable_sort(squares.begin(), squares.end(),
+                     [&](Square a, Square b) { return dist(a, ksq) < dist(b, ksq); });
+
+    // The previous search, for the same side, already saw a clear win: no probe.
+    const Value prev    = threads.main_manager()->bestPreviousScore;
+    const bool  winning = kpPrevValid && kpPrevUs == us && prev != VALUE_INFINITE
+                      && (is_win(prev) || UCIEngine::to_cp_normalized(prev, pos) >= 2 * WinCp);
+
+    bool cached = kpCached && kpCacheUs == us && kpCacheMat == mat;
+    if (winning)
+        squares.clear(), cached = false;
+    else if (cached && kpCacheSq == SQ_NONE && kpCacheSkip > 0)
+        squares.clear(), --kpCacheSkip;  // a recent miss: no new probe yet
+    else if (cached && kpCacheSq != SQ_NONE
+             && std::find(squares.begin(), squares.end(), kpCacheSq) != squares.end())
+        squares = {kpCacheSq};  // only check the known target again
+    else
+        cached = false;
+
+    // Silence the probes and keep what the time management learnt from the game.
+    const auto                              savedUpdates = updateContext;
+    std::atomic<bool>                       done{false};
+    updateContext.onUpdateNoMoves = [](const InfoShort&) {};
+    updateContext.onUpdateFull    = [](const InfoFull&) {};
+    updateContext.onIter          = [](const InfoIter&) {};
+    updateContext.onStart         = [] {};
+    updateContext.onBestmove      = [&](std::string_view, std::string_view) { done = true; };
+    auto* mm = threads.main_manager();
+    const auto   iterValue = mm->iterValue;
+    const double ptr = mm->previousTimeReduction, ota = mm->originalTimeAdjust;
+    const Value  bps = mm->bestPreviousScore, bpas = mm->bestPreviousAverageScore;
+    const int    hm = mm->humanMissed, hmp = mm->humanMatePly;
+
+    // Own clock time left for the probes, -1 while it is not running (analysis,
+    // or pondering before a ponderhit).
+    auto ownLeft = [&]() -> TimePoint {
+        std::lock_guard<std::mutex> lk(kpMutex);
+        if (analysis || (limits.ponderMode && !kpPonderhit))
+            return -1;
+        const TimePoint from = limits.ponderMode ? kpPonderhitTime : limits.startTime;
+        return std::max(TimePoint(0), budget - (now() - from));
+    };
+    auto aborted = [&] {
+        {
+            std::lock_guard<std::mutex> lk(kpMutex);
+            if (kpAbort)
+                return true;
+        }
+        return ownLeft() == 0;
+    };
+
+    // Score (cp, Elo score type) for us of our king on s, opponent to move.
+    // Returns false when aborted.
+    auto probe = [&](Square s, int left, int& cp) {
+        Position     p;
+        StateListPtr st(new std::deque<StateInfo>(1));
+        if (p.set(king_probe_fen(pos, us, ksq, s), &st->back()))
+            return cp = -100000, true;  // our king could be captured there
+        if (MoveList<ALL>(p).size() == 0)
+            return cp = 100000, true;  // the opponent has no move
+        Search::LimitsType pl;
+        pl.startTime  = now();
+        pl.algo       = Search::SearchAlgorithm::IMPROVED_MULTIPV2;
+        pl.algoReason = nullptr;
+        pl.kingProbe  = true;
+        // On the own clock the budget is shared by the squares left (1 s at least).
+        const TimePoint own = ownLeft();
+        pl.movetime = own < 0 ? probeMs : std::clamp(own / left, TimePoint(1000), probeMs);
+        done = false;
+        threads.start_thinking(p, st, pl);
+        bool stopped = false;
+        while (!done)
+        {
+            std::this_thread::sleep_for(2ms);
+            if (!stopped && aborted())
+                threads.stop = stopped = true;
+        }
+        threads.main_thread()->wait_for_search_finished();
+        if (stopped)
+            return false;
+        const Value v = threads.get_best_thread()->worker->best_root_score();
+        cp = is_decisive(v) ? (v > 0 ? -100000 : 100000) : -UCIEngine::to_cp_normalized(v, p);
+        return true;
+    };
+
+    Square      target = SQ_NONE;
+    int         best = -1000000, n = 0;
+    std::string detail;
+    bool   complete = true;
+    for (usize i = 0; i < squares.size(); ++i)
+    {
+        const Square s = squares[i];
+        int          cp;
+        if (!probe(s, int(squares.size() - i), cp))
+        {
+            complete = false;
+            break;
+        }
+        ++n;
+        detail += " " + UCIEngine::square(s) + ":" + std::to_string(std::clamp(cp, -9999, 9999));
+        if (cp > best)
+            best = cp, target = s;
+    }
+    if (target != SQ_NONE && best < WinCp)
+        target = SQ_NONE;
+    // Stopped before the end: a square already probed may still be the target,
+    // but it is not remembered as a complete result.
+
+    if (!winning && !complete && !cached && target != SQ_NONE)
+        kpCached = true, kpCacheUs = us, kpCacheMat = mat, kpCacheSq = target;
+    if (!winning && (complete || cached))
+    {
+        if (target == SQ_NONE && !squares.empty())
+            kpCacheSkip = cached ? 0 : 2;
+        kpCached   = complete || target != SQ_NONE;
+        kpCacheUs  = us;
+        kpCacheMat = mat;
+        if (complete && cached && target == SQ_NONE && kpCacheSq != SQ_NONE)
+            kpCached = false;  // the target no longer wins: probe all squares next time
+        if (!squares.empty())
+            kpCacheSq = target;
+        else
+            target = SQ_NONE;
+    }
+
+    mm->iterValue                = iterValue;
+    mm->previousTimeReduction    = ptr;
+    mm->originalTimeAdjust       = ota;
+    mm->bestPreviousScore        = bps;
+    mm->bestPreviousAverageScore = bpas;
+    mm->humanMissed = hm, mm->humanMatePly = hmp;
+    updateContext   = savedUpdates;
+
+    std::lock_guard<std::mutex> lk(kpMutex);
+    auto& kp  = Search::KingProbe::current;
+    kp.active = target != SQ_NONE;
+    kp.us     = us;
+    kp.sq     = target;
+    kp.sig    = Search::KingProbe::major_sig(pos);
+    if (winning)
+        sync_cout << "info string King_Probe skipped (already winning)" << sync_endl;
+    else if (squares.empty())
+        sync_cout << "info string King_Probe skipped (no target found recently)" << sync_endl;
+    else if (!squares.empty())
+        sync_cout << "info string King_Probe " << n << " square(s)"
+                  << (cached ? " (cached target)" : "") << (complete ? "" : " (stopped)")
+                  << ", target "
+                  << (target != SQ_NONE ? UCIEngine::square(target) : std::string("none"))
+                  << " (cp" << detail << ")" << sync_endl;
+    if (kpAbort)
+    {
+        // stop while probing: a short search for the bestmove (depth 1 when the
+        // GUI only stops pondering, 0.5 s otherwise)
+        const bool ponderStop = limits.ponderMode && !kpPonderhit;
+        limits.infinite = 0, limits.ponderMode = false;
+        limits.time[WHITE] = limits.time[BLACK] = 0;
+        limits.movetime = ponderStop ? 0 : 500, limits.depth = ponderStop ? 1 : 0;
+        limits.startTime = now();
+    }
+    else if (limits.ponderMode && kpPonderhit)
+        limits.ponderMode = false, limits.startTime = kpPonderhitTime;
+    else if (limits.ponderMode)
+        limits.startTime = now();
+    kpProbing   = false;
+    kpPrevValid = true, kpPrevUs = us;
     threads.start_thinking(pos, states, limits);
 }
 
@@ -460,6 +756,7 @@ void Engine::choose_search_algorithm(Search::LimitsType& limits) {
         limits.algoReason = nullptr;
         sixtyFastGame     = false;
         RuleConfig::skySearchChase = false;  // as for go depth / nodes
+        kingProbeTimeOk            = false;
         return;
     }
 
@@ -496,6 +793,12 @@ void Engine::choose_search_algorithm(Search::LimitsType& limits) {
     // 搜索中连捉／杀判断: analysis, or Ponder (后台思考) except 0-1 s per move and a
     // 1 minute game without increment.
     RuleConfig::skySearchChase = analysis || (ponder && !fastMove && !oneMinute);
+    // King_Probe: analysis, or Ponder on except 0-1 s per move and games of at
+    // most 5 minutes whatever the increment; never go depth / nodes / mate.
+    const bool shortGame = limits.use_time_management() && limits.time[us] > 0
+                        && gameBaseTime <= BlitzMaxBase + limits.inc[us];
+    kingProbeTimeOk = (analysis || (ponder && !fastMove && !shortGame)) && !limits.depth
+                   && !limits.nodes && !limits.mate;
 
     if (analysis)
         limits.algo = SearchAlgorithm::IMPROVED_MULTIPV3, limits.algoReason = "Analysis";
@@ -510,6 +813,8 @@ void Engine::choose_search_algorithm(Search::LimitsType& limits) {
 }
 
 void Engine::new_game_state() {
+    kpCached     = false;
+    kpPrevValid  = false;
     gameBaseTime = 0;
     gamePonder   = false;
     gameLastPly  = -1;
@@ -606,7 +911,11 @@ void Engine::avoid_sixty_move_draw(Search::LimitsType& limits) {
     limits.sixtyGuard = !limits.searchmoves.empty();
 }
 
-void Engine::stop() { threads.stop = true; }
+void Engine::stop() {
+    std::lock_guard<std::mutex> lk(kpMutex);
+    kpAbort      = kpProbing;
+    threads.stop = true;
+}
 
 // Windows: other processes whose name contains "pikafish", "pika", "fish",
 // "cyclone" or "bugchess" (same user, not this executable) get CPU priority
@@ -648,12 +957,23 @@ void Engine::set_on_verify_network(std::function<void(std::string_view)>&& f) {
     onVerifyNetwork = std::move(f);
 }
 
-void Engine::wait_for_search_finished() { threads.main_thread()->wait_for_search_finished(); }
+void Engine::wait_for_search_finished() {
+    king_probe_join();
+    threads.main_thread()->wait_for_search_finished();
+}
 
 std::optional<PositionSetError> Engine::set_position(const std::string&              fen,
                                                      const std::vector<std::string>& moves) {
     if (!HuanShen::LicenseGuard::ok())
         HWIDLock::is_authorized(std::string(options["License Key"]), nullptr, false);
+    if (kpThread.joinable())  // King_Probe still probing: give up (as for stop)
+    {
+        {
+            std::lock_guard<std::mutex> lk(kpMutex);
+            kpAbort = kpProbing;
+        }
+        king_probe_join();
+    }
     // Drop the old state and create a new one
     states   = StateListPtr(new std::deque<StateInfo>(1));
     auto err = pos.set(fen, &states->back());
@@ -705,6 +1025,7 @@ bool Engine::set_numa_config_from_option(const std::string& o) {
 }
 
 void Engine::resize_threads() {
+    king_probe_join();
     threads.wait_for_search_finished();
     threads.set(numaContext.get_numa_config(), {options, threads, tt, sharedHists, network},
                 updateContext);
@@ -719,7 +1040,13 @@ void Engine::set_tt_size(usize mb) {
     tt.resize(mb, threads);
 }
 
-void Engine::set_ponderhit(bool b) { threads.main_manager()->ponder = b; }
+void Engine::set_ponderhit(bool b) {
+    std::lock_guard<std::mutex> lk(kpMutex);
+    if (kpProbing)
+        kpPonderhit = !b, kpPonderhitTime = now();
+    else
+        threads.main_manager()->ponder = b;
+}
 
 // network related
 
@@ -796,7 +1123,10 @@ OptionsMap&       Engine::get_options() { return options; }
 
 std::string Engine::fen() const { return pos.fen(); }
 
-std::optional<PositionSetError> Engine::flip() { return pos.flip(); }
+std::optional<PositionSetError> Engine::flip() {
+    wait_for_search_finished();
+    return pos.flip();
+}
 
 std::string Engine::visualize() const {
     std::stringstream ss;
