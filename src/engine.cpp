@@ -462,6 +462,7 @@ void Engine::go(Search::LimitsType& limits) {
     }
 
     kpPrevValid = !limits.forceImproved, kpPrevUs = pos.side_to_move();
+    kpPrevKey   = pos.state()->key;
     threads.start_thinking(pos, states, limits);
 }
 
@@ -543,6 +544,15 @@ void Engine::king_probe_run(Search::LimitsType limits) {
     const Color  us  = pos.side_to_move();
     const Square ksq = pos.king_square(us);
     const u64    mat = king_probe_material(pos);
+    // `k` is the root of an earlier search of this game: the same position or
+    // one played before it (at most `plies` back, exactly when `exact`).
+    auto fromGame = [&](Key k, int plies, bool exact) {
+        const StateInfo* st = pos.state();
+        for (int i = 0; st && i <= plies; ++i, st = st->previous)
+            if ((!exact || i == plies) && st->key == k)
+                return true;
+        return false;
+    };
     const bool   analysis = limits.infinite
                        || (!limits.use_time_management() && !limits.movetime && !limits.depth
                            && !limits.nodes && !limits.mate);
@@ -575,13 +585,16 @@ void Engine::king_probe_run(Search::LimitsType limits) {
 
     // The previous search, for the same side, already saw a clear win: no probe.
     const Value prev    = threads.main_manager()->bestPreviousScore;
-    const bool  winning = kpPrevValid && kpPrevUs == us && prev != VALUE_INFINITE
+    // Only when it was our previous move of this game (not another position
+    // looked at in the GUI).
+    const bool  winning = kpPrevValid && kpPrevUs == us && fromGame(kpPrevKey, 2, true)
+                      && prev != VALUE_INFINITE
                       && (is_win(prev) || UCIEngine::to_cp_normalized(prev, pos) >= 2 * WinCp);
 
-    bool cached = kpCached && kpCacheUs == us && kpCacheMat == mat;
+    bool cached = kpCached && kpCacheUs == us && kpCacheMat == mat && fromGame(kpCacheKey, 40, false);
     if (winning)
         squares.clear(), cached = false;
-    else if (cached && kpCacheSq == SQ_NONE && kpCacheSkip > 0)
+    else if (cached && kpCacheSq == SQ_NONE && kpCacheSkip > 0 && kpCacheKey != pos.state()->key)
         squares.clear(), --kpCacheSkip;  // a recent miss: no new probe yet
     else if (cached && kpCacheSq != SQ_NONE
              && std::find(squares.begin(), squares.end(), kpCacheSq) != squares.end())
@@ -593,7 +606,13 @@ void Engine::king_probe_run(Search::LimitsType limits) {
     const auto                              savedUpdates = updateContext;
     std::atomic<bool>                       done{false};
     updateContext.onUpdateNoMoves = [](const InfoShort&) {};
-    updateContext.onUpdateFull    = [](const InfoFull&) {};
+    // A probe that already sees a mate for us ends at once (it cannot get better).
+    std::atomic<bool> probeMate{false};
+    updateContext.onUpdateFull = [&](const InfoFull& i) {
+        if (i.multiPV == 1 && i.bound.empty() && i.score.is<Score::Mate>()
+            && i.score.get<Score::Mate>().plies < 0)
+            probeMate = true;
+    };
     updateContext.onIter          = [](const InfoIter&) {};
     updateContext.onStart         = [] {};
     updateContext.onBestmove      = [&](std::string_view, std::string_view) { done = true; };
@@ -621,6 +640,15 @@ void Engine::king_probe_run(Search::LimitsType limits) {
         return ownLeft() == 0;
     };
 
+    // Progress while probing (about once a second): time, nodes and speed, so
+    // that the GUI does not look idle.
+    u64  probeNodes = 0;
+    auto progress   = [&](u64 nodes) {
+        const TimePoint t = std::max(TimePoint(1), now() - limits.startTime);
+        sync_cout << "info time " << t << " nodes " << nodes << " nps " << nodes * 1000 / t
+                  << sync_endl;
+    };
+
     // Score (cp, Elo score type) for us of our king on s, opponent to move.
     // Returns false when aborted.
     auto probe = [&](Square s, int left, int& cp) {
@@ -638,16 +666,22 @@ void Engine::king_probe_run(Search::LimitsType limits) {
         // On the own clock the budget is shared by the squares left (1 s at least).
         const TimePoint own = ownLeft();
         pl.movetime = own < 0 ? probeMs : std::clamp(own / left, TimePoint(1000), probeMs);
-        done = false;
+        done = false, probeMate = false;
         threads.start_thinking(p, st, pl);
         bool stopped = false;
+        int  ticks   = 0;
         while (!done)
         {
             std::this_thread::sleep_for(2ms);
             if (!stopped && aborted())
                 threads.stop = stopped = true;
+            else if (probeMate)
+                threads.stop = true;
+            if (++ticks % 500 == 0)
+                progress(probeNodes + threads.nodes_searched());
         }
         threads.main_thread()->wait_for_search_finished();
+        probeNodes += threads.nodes_searched();
         if (stopped)
             return false;
         const Value v = threads.get_best_thread()->worker->best_root_score();
@@ -670,8 +704,14 @@ void Engine::king_probe_run(Search::LimitsType limits) {
         }
         ++n;
         detail += " " + UCIEngine::square(s) + ":" + std::to_string(std::clamp(cp, -9999, 9999));
+        sync_cout << "info string King_Probe " << n << "/" << squares.size() << " "
+                  << UCIEngine::square(s) << " " << std::clamp(cp, -9999, 9999) << " cp"
+                  << sync_endl;
+        progress(probeNodes);
         if (cp > best)
             best = cp, target = s;
+        if (best >= 100000)
+            break;  // a mate for us: no other square can do better
     }
     if (target != SQ_NONE && best < WinCp)
         target = SQ_NONE;
@@ -679,7 +719,8 @@ void Engine::king_probe_run(Search::LimitsType limits) {
     // but it is not remembered as a complete result.
 
     if (!winning && !complete && !cached && target != SQ_NONE)
-        kpCached = true, kpCacheUs = us, kpCacheMat = mat, kpCacheSq = target;
+        kpCached = true, kpCacheUs = us, kpCacheMat = mat, kpCacheSq = target,
+        kpCacheKey = pos.state()->key;
     if (!winning && (complete || cached))
     {
         if (target == SQ_NONE && !squares.empty())
@@ -687,6 +728,7 @@ void Engine::king_probe_run(Search::LimitsType limits) {
         kpCached   = complete || target != SQ_NONE;
         kpCacheUs  = us;
         kpCacheMat = mat;
+        kpCacheKey = pos.state()->key;
         if (complete && cached && target == SQ_NONE && kpCacheSq != SQ_NONE)
             kpCached = false;  // the target no longer wins: probe all squares next time
         if (!squares.empty())
@@ -734,7 +776,7 @@ void Engine::king_probe_run(Search::LimitsType limits) {
     else if (limits.ponderMode)
         limits.startTime = now();
     kpProbing   = false;
-    kpPrevValid = true, kpPrevUs = us;
+    kpPrevValid = true, kpPrevUs = us, kpPrevKey = pos.state()->key;
     threads.start_thinking(pos, states, limits);
 }
 

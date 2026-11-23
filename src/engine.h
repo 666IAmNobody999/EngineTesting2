@@ -166,11 +166,13 @@ class Engine {
     // Last result, reused while the material stays the same
     bool   kpCached    = false;
     Color  kpCacheUs   = WHITE;
+    Key    kpCacheKey  = 0;        // root of the search that stored it
     u64    kpCacheMat  = 0;
     Square kpCacheSq   = SQ_NONE;  // SQ_NONE: no target found
     int    kpCacheSkip = 0;        // searches left before probing again after a miss
     bool   kpPrevValid = false;    // side to move of the previous search
     Color  kpPrevUs    = WHITE;
+    Key    kpPrevKey   = 0;        // root of the previous search
 };
 
 }  // namespace Stockfish
