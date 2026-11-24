@@ -244,8 +244,9 @@ void Search::Worker::start_searching() {
     // thread has already swapped its chosen move into rootMoves[0]; thread
     // voting would undo that.
     // After an Avoid_Sixty_Move_Draw tier change a helper may still hold the old tier.
-    if (!limits.depth && !skill.enabled() && Attack::parse(options) != AttackMode::FORCED_DRAW
-        && !Attack::human_like(Attack::parse(options)) && !sixtyTier)
+    const AttackMode mode = limits.killerCheck ? AttackMode::BEST_MOVE : Attack::parse(options);
+    if (!limits.depth && !skill.enabled() && mode != AttackMode::FORCED_DRAW
+        && !Attack::human_like(mode) && !sixtyTier)
         bestThread = threads.get_best_thread()->worker.get();
 
     main_manager()->bestPreviousScore        = bestThread->rootMoves[0].score;
@@ -326,8 +327,9 @@ bool Search::Worker::iterative_deepening() {
         multiPV = std::max(multiPV, skill.elo ? Skill::human_multipv(skill.elo) : usize(4));
 
     rootColor  = rootPos.side_to_move();
-    attackMode = Attack::parse(options);
-    kpActive   = KingProbe::current.active && KingProbe::current.us == rootColor;
+    attackMode = limits.killerCheck ? AttackMode::BEST_MOVE : Attack::parse(options);
+    kpActive   = KingProbe::current.active && KingProbe::current.us == rootColor
+            && !limits.killerCheck;
     kpTarget   = KingProbe::current.sq;
     kpSig      = KingProbe::current.sig;
     evalShaping = kpActive || Attack::bare_king(attackMode);
@@ -360,7 +362,7 @@ bool Search::Worker::iterative_deepening() {
     const bool  altRotate = true;
 
     // Tell the GUI which search is actually used for this go (not in bench).
-    if (is_mainthread() && !limits.forceImproved && !limits.kingProbe)
+    if (is_mainthread() && !limits.forceImproved && !limits.kingProbe && !limits.killerCheck)
         sync_cout << "info string Search Algorithm: "
                   << (!altLine                                      ? "Original"
                       : algo == SearchAlgorithm::IMPROVED_MULTIPV3 ? "ImprovedMultiPV3"
@@ -2720,6 +2722,8 @@ AttackMode Search::Attack::parse(const OptionsMap& options) {
     return o == "BareKing"          ? AttackMode::BARE_KING
          : o == "HumanLike"         ? AttackMode::HUMAN_LIKE
          : o == "HumanLikeBareKing" ? AttackMode::HUMAN_LIKE_BARE_KING
+         : o == "HumanKiller"       ? (killerFull ? AttackMode::HUMAN_LIKE
+                                                  : AttackMode::HUMAN_LIKE_BARE_KING)
          : o == "ForcedDraw"        ? AttackMode::FORCED_DRAW
                                     : AttackMode::BEST_MOVE;
 }

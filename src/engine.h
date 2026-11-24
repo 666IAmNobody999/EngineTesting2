@@ -129,7 +129,9 @@ class Engine {
     void new_game_state();
     // King_Probe (帥位試探, see Search::KingProbe)
     bool king_probe_eligible(const Search::LimitsType& limits) const;
-    void king_probe_run(Search::LimitsType limits);
+    void king_probe_run(Search::LimitsType limits, bool probe, bool killerCheck);
+    bool killer_check_needed(const Search::LimitsType& limits);
+    bool from_game(Key k, int plies, bool exact) const;
     void king_probe_join();
     const std::filesystem::path binaryDirectory;
 
@@ -173,6 +175,9 @@ class Engine {
     bool   kpPrevValid = false;    // side to move of the previous search
     Color  kpPrevUs    = WHITE;
     Key    kpPrevKey   = 0;        // root of the previous search
+    // HumanKiller: the mate check of the previous move saw a mate for us
+    bool   killerPrevMate = false;
+    Key    killerPrevKey  = 0;
 };
 
 }  // namespace Stockfish

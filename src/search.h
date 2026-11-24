@@ -180,6 +180,9 @@ using RootMoves = std::vector<RootMove>;
 //                 used against a bare king.
 //   HUMAN_LIKE_BARE_KING : both of the above; the Human-like choice is made on
 //                 the Bare King shaped scores.
+//   HumanKiller (option only, no enum value): HUMAN_LIKE_BARE_KING until a mate
+//                 is given up once (seen on the previous move, gone now), then
+//                 HUMAN_LIKE with the normal evaluation until the next game.
 //   FORCED_DRAW : the search runs as usual with MultiPV >= 6 and the root move
 //                 whose score is closest to zero is played.
 enum class AttackMode {
@@ -328,6 +331,12 @@ constexpr int DrawPlayRepeatWeight = 4;
 constexpr int DrawPlayCaptureWeight = 2;
 
 // Reads the "Attack Mode" combo option.
+// HumanKiller: Human-like Bare King until a mate has been missed once in this
+// game (set by the engine, see Engine::king_probe_run), then Human-like with the
+// normal evaluation (mates played at full strength) until the next game.
+inline std::atomic<bool> killerFull{false};
+constexpr TimePoint KillerCheckMs = 1000;  // mate check per move at most
+
 AttackMode parse(const OptionsMap& options);
 }
 
@@ -413,6 +422,7 @@ struct LimitsType {
     bool                     ponderMode;
     bool                     forceImproved;  // bench: no info string Search Algorithm
     bool                     kingProbe = false;  // King_Probe search: no info string either
+    bool                     killerCheck = false;  // HumanKiller mate check: Best Move, silent
     SearchAlgorithm          algo;           // chosen by Engine::go()
     const char*              algoReason;     // why (info string), nullptr in bench
     // Avoid_Sixty_Move_Draw: searchmoves holds its first tier (captures or offers);

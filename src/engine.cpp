@@ -212,9 +212,10 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     // of Bare King live in the transposition table, so switching modes clears it.
     options.add(  //
       "Attack Mode",
-      Option("BestMove var BestMove var BareKing var HumanLike var HumanLikeBareKing var ForcedDraw",
+      Option("BestMove var BestMove var BareKing var HumanLike var HumanKiller var HumanLikeBareKing var ForcedDraw",
              "BestMove",
              [this](const Option&) {
+                 Search::Attack::killerFull = false, killerPrevMate = false;
                  search_clear();
                  return std::nullopt;
              }));
@@ -229,7 +230,8 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     // Avoid_Sixty_Move_Draw: when materially ahead and the natural-move limit is
     // a few plies away, only captures (or moves that offer the opponent a capture)
     // are searched, skipping those that lose by force or by more than 200 cp.
-    //  * HumanLike / HumanLikeBareKing: always (any time control, pondering or not),
+    //  * HumanLike / HumanKiller / HumanLikeBareKing: always (any time control,
+    //    pondering or not),
     //    whatever the option;
     //  * BestMove / BareKing: only when true, and only at 0-1 s per move, a 1 minute
     //    game without increment, or in analysis;
@@ -451,13 +453,15 @@ void Engine::go(Search::LimitsType& limits) {
     }
 
     Search::KingProbe::current.active = false;
-    if (king_probe_eligible(limits))
+    const bool probe  = king_probe_eligible(limits);
+    const bool kcheck = killer_check_needed(limits);
+    if (probe || kcheck)
     {
         {
             std::lock_guard<std::mutex> lk(kpMutex);
             kpProbing = true, kpAbort = kpPonderhit = false;
         }
-        kpThread = std::thread([this, limits]() { king_probe_run(limits); });
+        kpThread = std::thread([this, limits, probe, kcheck]() { king_probe_run(limits, probe, kcheck); });
         return;
     }
 
@@ -479,6 +483,36 @@ bool Engine::king_probe_eligible(const Search::LimitsType& limits) const {
     const Color us = pos.side_to_move();
     return !pos.checkers() && Search::KingProbe::majors(pos) <= Search::KingProbe::MaxMajors
         && pos.count<ROOK>(us) + pos.count<KNIGHT>(us) + pos.count<CANNON>(us) > 0;
+}
+
+// `k` is the root of an earlier search of this game: the same position or one
+// played before it (at most `plies` back, exactly when `exact`).
+bool Engine::from_game(Key k, int plies, bool exact) const {
+    const StateInfo* st = pos.state();
+    for (int i = 0; st && i <= plies; ++i, st = st->previous)
+        if ((!exact || i == plies) && st->key == k)
+            return true;
+    return false;
+}
+
+// HumanKiller, still in its Bare King part: a short normal search checks for a
+// mate before the real search, when the previous move (this game, same side)
+// either had a mate or was clearly winning (Bare King shaping on). No check in
+// any other mode, with a strength handicap or a depth / nodes / mate limit.
+bool Engine::killer_check_needed(const Search::LimitsType& limits) {
+    if (options["Attack Mode"] != "HumanKiller" || Search::Attack::killerFull
+        || limits.forceImproved || !limits.searchmoves.empty() || limits.sixtyGuard
+        || limits.depth || limits.nodes || limits.mate || !states.get())
+        return false;
+    if (int(options["Skill Level"]) < 20 || Search::Skill::human_elo(options))
+        return false;
+    if (killerPrevMate && from_game(killerPrevKey, 2, true))
+        return true;
+    if (!kpPrevValid || kpPrevUs != pos.side_to_move() || !from_game(kpPrevKey, 2, true))
+        return false;
+    const Value prev = threads.main_manager()->bestPreviousScore;
+    return prev != VALUE_INFINITE && !is_loss(prev)
+        && (is_win(prev) || prev >= Search::Attack::Threshold);
 }
 
 void Engine::king_probe_join() {
@@ -537,22 +571,14 @@ u64 king_probe_material(const Position& pos) {
 // Runs on its own thread so that the UCI loop stays responsive: probes each
 // palace square with the normal (multi-threaded) search, output silenced, then
 // starts the real search with the target, if any.
-void Engine::king_probe_run(Search::LimitsType limits) {
+void Engine::king_probe_run(Search::LimitsType limits, bool probeOn, bool killerCheck) {
     using namespace std::chrono_literals;
     using Search::KingProbe::WinCp;
 
     const Color  us  = pos.side_to_move();
     const Square ksq = pos.king_square(us);
     const u64    mat = king_probe_material(pos);
-    // `k` is the root of an earlier search of this game: the same position or
-    // one played before it (at most `plies` back, exactly when `exact`).
-    auto fromGame = [&](Key k, int plies, bool exact) {
-        const StateInfo* st = pos.state();
-        for (int i = 0; st && i <= plies; ++i, st = st->previous)
-            if ((!exact || i == plies) && st->key == k)
-                return true;
-        return false;
-    };
+    auto fromGame = [&](Key k, int plies, bool exact) { return from_game(k, plies, exact); };
     const bool   analysis = limits.infinite
                        || (!limits.use_time_management() && !limits.movetime && !limits.depth
                            && !limits.nodes && !limits.mate);
@@ -582,16 +608,18 @@ void Engine::king_probe_run(Search::LimitsType limits) {
     };
     std::stable_sort(squares.begin(), squares.end(),
                      [&](Square a, Square b) { return dist(a, ksq) < dist(b, ksq); });
+    if (!probeOn)
+        squares.clear();  // only the HumanKiller mate check
 
     // The previous search, for the same side, already saw a clear win: no probe.
     const Value prev    = threads.main_manager()->bestPreviousScore;
     // Only when it was our previous move of this game (not another position
     // looked at in the GUI).
-    const bool  winning = kpPrevValid && kpPrevUs == us && fromGame(kpPrevKey, 2, true)
+    const bool  winning = probeOn && kpPrevValid && kpPrevUs == us && fromGame(kpPrevKey, 2, true)
                       && prev != VALUE_INFINITE
                       && (is_win(prev) || UCIEngine::to_cp_normalized(prev, pos) >= 2 * WinCp);
 
-    bool cached = kpCached && kpCacheUs == us && kpCacheMat == mat && fromGame(kpCacheKey, 40, false);
+    bool cached = probeOn && kpCached && kpCacheUs == us && kpCacheMat == mat && fromGame(kpCacheKey, 40, false);
     if (winning)
         squares.clear(), cached = false;
     else if (cached && kpCacheSq == SQ_NONE && kpCacheSkip > 0 && kpCacheKey != pos.state()->key)
@@ -610,6 +638,7 @@ void Engine::king_probe_run(Search::LimitsType limits) {
     // WinCp for us (exact, two iterations in a row): that square becomes the
     // target and the other squares are not probed.
     std::atomic<bool> probeMate{false};  // set when the probe can end
+    bool              checkRun  = false;  // the HumanKiller mate check (our move)
     const Position*   probePos  = nullptr;
     int               goodDepth = 0, goodCount = 0;
     updateContext.onUpdateFull = [&](const InfoFull& i) {
@@ -617,7 +646,8 @@ void Engine::king_probe_run(Search::LimitsType limits) {
             return;
         bool good;
         if (i.score.is<Score::Mate>())
-            good = i.score.get<Score::Mate>().plies < 0;
+            good = checkRun ? i.score.get<Score::Mate>().plies > 0
+                            : i.score.get<Score::Mate>().plies < 0;
         else
             good = probePos && -UCIEngine::to_cp_normalized(i.value, *probePos) >= WinCp;
         if (!good)
@@ -704,6 +734,56 @@ void Engine::king_probe_run(Search::LimitsType limits) {
         return true;
     };
 
+    // HumanKiller mate check: a short normal search (no Bare King shaping) of
+    // the root. A mate for us seen on the previous move of this game but no more
+    // now means that it was given up (for material): from now on the mode plays
+    // Human-like with the normal evaluation, mates at full strength.
+    bool checkStopped = false;
+    if (killerCheck)
+    {
+        Position     p;
+        StateListPtr st(new std::deque<StateInfo>(1));
+        p.set(pos.fen(), &st->back());
+        Search::LimitsType pl;
+        pl.startTime   = now();
+        pl.algo        = Search::SearchAlgorithm::IMPROVED_MULTIPV2;
+        pl.algoReason  = nullptr;
+        pl.killerCheck = true;
+        const TimePoint own = ownLeft();
+        pl.movetime = own < 0 ? Search::Attack::KillerCheckMs
+                              : std::clamp(own / 10, TimePoint(50), Search::Attack::KillerCheckMs);
+        done = false, probeMate = false, checkRun = true;
+        probePos = nullptr, goodDepth = goodCount = 0;
+        threads.start_thinking(p, st, pl);
+        while (!done)
+        {
+            std::this_thread::sleep_for(2ms);
+            if (!checkStopped && aborted())
+                threads.stop = checkStopped = true;
+            else if (probeMate)
+                threads.stop = true;
+        }
+        threads.main_thread()->wait_for_search_finished();
+        probeNodes += threads.nodes_searched();
+        checkRun = false;
+        if (!checkStopped)
+        {
+            const bool mate = is_win(threads.main_thread()->worker->best_root_score());
+            if (!mate && killerPrevMate && fromGame(killerPrevKey, 2, true))
+            {
+                Search::Attack::killerFull = true;
+                tt.clear(threads);  // no Bare King values left in the hash
+                sync_cout << "info string HumanKiller: a mate was missed, mates at full strength now"
+                          << sync_endl;
+            }
+            killerPrevMate = mate, killerPrevKey = pos.state()->key;
+        }
+    }
+    else
+        killerPrevMate = false;
+    if (checkStopped)
+        squares.clear();
+
     Square      target = SQ_NONE;
     int         best = -1000000, n = 0;
     std::string detail;
@@ -733,10 +813,11 @@ void Engine::king_probe_run(Search::LimitsType limits) {
     // Stopped before the end: a square already probed may still be the target,
     // but it is not remembered as a complete result.
 
-    if (!winning && !complete && !cached && target != SQ_NONE)
+    const bool probed = probeOn && !checkStopped;  // the probe part did run
+    if (probed && !winning && !complete && !cached && target != SQ_NONE)
         kpCached = true, kpCacheUs = us, kpCacheMat = mat, kpCacheSq = target,
         kpCacheKey = pos.state()->key;
-    if (!winning && (complete || cached))
+    if (probed && !winning && (complete || cached))
     {
         if (target == SQ_NONE && !squares.empty())
             kpCacheSkip = cached ? 0 : 2;
@@ -766,7 +847,9 @@ void Engine::king_probe_run(Search::LimitsType limits) {
     kp.us     = us;
     kp.sq     = target;
     kp.sig    = Search::KingProbe::major_sig(pos);
-    if (winning)
+    if (!probed)
+        ;  // only the HumanKiller mate check (or stopped during it)
+    else if (winning)
         sync_cout << "info string King_Probe skipped (already winning)" << sync_endl;
     else if (squares.empty())
         sync_cout << "info string King_Probe skipped (no target found recently)" << sync_endl;
@@ -872,6 +955,8 @@ void Engine::choose_search_algorithm(Search::LimitsType& limits) {
 void Engine::new_game_state() {
     kpCached     = false;
     kpPrevValid  = false;
+    Search::Attack::killerFull = false;  // HumanKiller: Bare King again
+    killerPrevMate             = false;
     gameBaseTime = 0;
     gamePonder   = false;
     gameLastPly  = -1;
@@ -897,7 +982,7 @@ void Engine::avoid_sixty_move_draw(Search::LimitsType& limits) {
     if (!limits.searchmoves.empty() || limits.forceImproved)
         return;
 
-    // HumanLike / HumanLikeBareKing: always, whatever the option. BestMove / BareKing:
+    // HumanLike / HumanKiller / HumanLikeBareKing: always, whatever the option. BestMove / BareKing:
     // only with the option, in a fast game or analysis (sixtyFastGame). Forced Draw:
     // never.
     const auto mode = Search::Attack::parse(options);
