@@ -105,6 +105,20 @@ inline void sky_publish(StateInfo* s, u16 victims, u16 checkers, u16 chasers) {
 #endif
 }
 
+// 天天象棋 identity of a checking piece for the 连将 counters: a cannon whose screen
+// (炮架) is the piece that just moved (to) is a check by that moved piece (e.g. a cannon
+// moving in front of the other cannon, 重炮); otherwise the checking piece itself
+// (also for a discovered check, 闪将). A checker can only have pieces between it and
+// the king when it is a cannon.
+inline Square sky_check_owner(Square checker, Square king, Square to) {
+    const int cf = file_of(checker), cr = rank_of(checker), kf = file_of(king),
+              kr = rank_of(king), tf = file_of(to), tr = rank_of(to);
+    const bool screen = cf == kf ? tf == cf && (tr - cr) * (tr - kr) < 0
+                      : cr == kr ? tr == cr && (tf - cf) * (tf - kf) < 0
+                                 : false;
+    return screen ? to : checker;
+}
+
 inline void sky_invalidate(StateInfo* s) {
     s->skyVictims  = 0;
     s->skyCheckers = 0;
@@ -1578,9 +1592,11 @@ int Position::sky_records(SkyMoveRecord* out, int maxPlies, int killParity) {
 
         if (r.check)
         {
-            Bitboard checks = cur->checkersBB;
+            Bitboard     checks = cur->checkersBB;
+            const Square ksq    = scratch.king_square(scratch.sideToMove);
             while (checks)
-                r.checkers |= u16(1u << scratch.idBoard[pop_lsb(checks)]);
+                r.checkers |= u16(1u << scratch.idBoard[sky_check_owner(
+                                  pop_lsb(checks), ksq, cur->move.to_sq())]);
         }
 
         if (r.capture)
@@ -1980,16 +1996,26 @@ int Position::sky_check_run_limit(bool prev) const {
 
     int id[SQUARE_NB];
     std::memcpy(id, idBoard, sizeof(id));
+    // The king squares, followed back with the moves (a king is never captured).
+    Square ksq[COLOR_NB] = {king_square(WHITE), king_square(BLACK)};
+    auto   back          = [&](const Move m, const StateInfo* s) {
+        for (Square& k : ksq)
+            if (k == m.to_sq())
+                k = m.from_sq();
+        id[m.from_sq()] = id[m.to_sq()];
+        id[m.to_sq()]   = s->capturedPiece != NO_PIECE ? s->skyCapturedId : 0;
+    };
 
-    const StateInfo* p = st;
+    const StateInfo* p       = st;
+    Color            checked = sideToMove;  // the side to move at p
     if (prev)
     {
         const Move m = p->move;
         if (!m.is_ok() || !p->previous)
             return 6;
-        id[m.from_sq()] = id[m.to_sq()];
-        id[m.to_sq()]   = p->capturedPiece != NO_PIECE ? p->skyCapturedId : 0;
-        p               = p->previous;
+        back(m, p);
+        p       = p->previous;
+        checked = ~checked;
     }
     const int run = std::min(int(p->skyCheckRun), 18);
     u16       ids = 0, newer = 0;
@@ -1998,7 +2024,7 @@ int Position::sky_check_run_limit(bool prev) const {
         u16      cur = 0;
         Bitboard b   = p->checkersBB;
         while (b)
-            cur |= u16(1u << (id[pop_lsb(b)] & 15));
+            cur |= u16(1u << (id[sky_check_owner(pop_lsb(b), ksq[checked], p->move.to_sq())] & 15));
         if (cur & newer)
             return 6;  // 一子长将
         ids |= cur;
@@ -2010,9 +2036,8 @@ int Position::sky_check_run_limit(bool prev) const {
             const Move m = p->move;
             if (!m.is_ok() || !p->previous)
                 return 6;
-            id[m.from_sq()] = id[m.to_sq()];
-            id[m.to_sq()]   = p->capturedPiece != NO_PIECE ? p->skyCapturedId : 0;
-            p               = p->previous;
+            back(m, p);
+            p = p->previous;
         }
     }
     return sky_check_limit(false, ids);
@@ -2047,10 +2072,12 @@ void Position::set_sky_info(int d) {
         // In the target SkyRule, a checking move is not simultaneously counted as a chase.
         if (cur->checkersBB)
         {
-            u16      checkers = 0;
-            Bitboard checks   = cur->checkersBB;
+            u16          checkers = 0;
+            Bitboard     checks   = cur->checkersBB;
+            const Square ksq      = king_square(sideToMove);
             while (checks)
-                checkers |= u16(1u << idBoard[pop_lsb(checks)]);
+                checkers |= u16(1u << idBoard[sky_check_owner(pop_lsb(checks), ksq,
+                                                              cur->move.to_sq())]);
 
             // 将捉同时出现: the victims chased by the checking move itself.
             SkyChaseMap after = sky_chased(mover);
