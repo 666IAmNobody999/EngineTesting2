@@ -132,6 +132,7 @@ class Engine {
     void king_probe_run(Search::LimitsType limits, bool probe, bool killerCheck);
     bool killer_check_needed(const Search::LimitsType& limits);
     bool from_game(Key k, int plies, bool exact) const;
+    std::filesystem::path knowledge_path() const;
     void king_probe_join();
     const std::filesystem::path binaryDirectory;
 

@@ -20,7 +20,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <deque>
 #include <initializer_list>
 #include <iostream>
@@ -148,6 +150,187 @@ Move book_move(const Position& pos, int maxDepth, u64 persona) {
             r -= weights[i];
     return moves[n - 1];
 }
+
+// EngineKnowledge.bin: an external opening book converted from an XQB book (see
+// tools/xqb2knowledge), used at full strength. Little endian: a 16 byte header
+// ("HSEK", u32 version 1, u64 count), then records of 24 bytes sorted by key and
+// move (u64 key, u16 move, i16 score, u32 win, draw, lost). The key is the FNV-1a
+// hash of the XQB key of the position: the side to move as red (black to move:
+// colours swapped and the board turned), files mirrored so that the first
+// different pair of mirror squares (rows from the top, files a..d) has the larger
+// code on the left; 1 bit 0 per empty square, 1 bit 1 and 4 bits code (red
+// RNBAKCP 1..7, black + 8) per piece. The move is (from row << 12 | from file << 8
+// | to row << 4 | to file), rows from the top, in that board. The file is read
+// with a binary search at each lookup, never loaded into memory.
+namespace Knowledge {
+
+constexpr usize HeaderSize = 16, RecordSize = 24, MaxMoves = 64;
+
+struct Entry {
+    Move move;
+    int  score;
+    u64  games;
+};
+
+// The XQB key bytes of `pos` (see above) with the files mirrored when `mirror`;
+// `canonical` is the mirror the XQB format itself uses.
+u64 key_hash(const Position& pos, bool mirror) {
+    constexpr int Code[] = {0, 1, 4, 6, 7, 2, 3, 5};  // by PieceType: R A C P N B K
+    const Color   us     = pos.side_to_move();
+    unsigned char bytes[64]{};
+    int           bit = 0;
+    auto          put = [&](int b) {
+        if (b)
+            bytes[bit >> 3] |= u8(0x80 >> (bit & 7));
+        ++bit;
+    };
+    for (int row = 0; row < 10; ++row)
+        for (int col = 0; col < 9; ++col)
+        {
+            const int   c  = mirror ? 8 - col : col;
+            const Square s = us == WHITE ? make_square(File(c), Rank(9 - row))
+                                         : make_square(File(8 - c), Rank(row));
+            const Piece pc = pos.piece_on(s);
+            if (pc == NO_PIECE)
+            {
+                put(0);
+                continue;
+            }
+            const int v = Code[type_of(pc)] + (color_of(pc) == us ? 0 : 8);
+            put(1);
+            for (int k = 3; k >= 0; --k)
+                put((v >> k) & 1);
+        }
+    u64 h = 0xCBF29CE484222325ULL;
+    for (int i = 0; i < (bit + 7) / 8; ++i)
+        h = (h ^ bytes[i]) * 0x100000001B3ULL;
+    return h;
+}
+
+// The mirror of the XQB format: compare the mirror squares row by row (from the
+// top, files a..d), the first different pair decides (empty -1).
+bool canonical_mirror(const Position& pos) {
+    constexpr int Code[] = {0, 1, 4, 6, 7, 2, 3, 5};
+    const Color   us     = pos.side_to_move();
+    auto          code   = [&](int row, int col) {
+        const Square s  = us == WHITE ? make_square(File(col), Rank(9 - row))
+                                      : make_square(File(8 - col), Rank(row));
+        const Piece  pc = pos.piece_on(s);
+        return pc == NO_PIECE ? -1 : Code[type_of(pc)] + (color_of(pc) == us ? 0 : 8);
+    };
+    for (int row = 0; row < 10; ++row)
+        for (int col = 0; col < 4; ++col)
+            if (code(row, col) != code(row, 8 - col))
+                return code(row, 8 - col) > code(row, col);
+    return false;
+}
+
+u64 le(const unsigned char* p, int n) {
+    u64 v = 0;
+    for (int i = n - 1; i >= 0; --i)
+        v = v << 8 | p[i];
+    return v;
+}
+
+// All the moves of the file for `key`, decoded for `pos` (`mirror` as used for the
+// key), appended to `out`.
+void read_moves(std::ifstream& f, u64 count, u64 key, const Position& pos, bool mirror,
+                std::vector<Entry>& out) {
+    unsigned char rec[RecordSize];
+    auto          read_at = [&](u64 i) {
+        f.seekg(std::streamoff(HeaderSize + i * RecordSize));
+        return bool(f.read(reinterpret_cast<char*>(rec), RecordSize));
+    };
+    u64 lo = 0, hi = count;  // first record with a key >= `key`
+    while (lo < hi)
+    {
+        const u64 mid = lo + (hi - lo) / 2;
+        if (!read_at(mid))
+            return;
+        if (le(rec, 8) < key)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    const bool black = pos.side_to_move() == BLACK;
+    for (u64 i = lo; i < count && out.size() < MaxMoves && read_at(i) && le(rec, 8) == key; ++i)
+    {
+        const int mv = int(le(rec + 8, 2));
+        int fr = (mv >> 12) & 15, fc = (mv >> 8) & 15, tr = (mv >> 4) & 15, tc = mv & 15;
+        if (fr > 9 || tr > 9 || fc > 8 || tc > 8)
+            continue;
+        if (mirror)
+            fc = 8 - fc, tc = 8 - tc;
+        if (black)
+            fr = 9 - fr, tr = 9 - tr, fc = 8 - fc, tc = 8 - tc;
+        const Move m(make_square(File(fc), Rank(9 - fr)), make_square(File(tc), Rank(9 - tr)));
+        if (std::any_of(out.begin(), out.end(), [&](const Entry& e) { return e.move == m; }))
+            continue;
+        out.push_back({m, int(i16(le(rec + 10, 2))),
+                       le(rec + 12, 4) + le(rec + 16, 4) + le(rec + 20, 4)});
+    }
+}
+
+// The move of the file for `pos`, Move::none() if none (no file, not a book
+// position, no legal move left). Among the legal moves that do not repeat a
+// position of the game, those at most ScoreMargin below the best score are
+// chosen at random in proportion to their games (at least 1).
+Move probe(const std::filesystem::path& file, Position& pos, usize* found) {
+    constexpr int ScoreMargin = 20;
+
+    std::ifstream f(file, std::ios::binary);
+    unsigned char head[HeaderSize];
+    if (!f || !f.read(reinterpret_cast<char*>(head), HeaderSize) || std::memcmp(head, "HSEK", 4)
+        || le(head + 4, 4) != 1)
+        return Move::none();
+    const u64 count = le(head + 8, 8);
+
+    std::vector<Entry> entries;
+    const bool         canon = canonical_mirror(pos);
+    read_moves(f, count, key_hash(pos, canon), pos, canon, entries);
+    // A book written without the mirror rule: the other orientation as well.
+    if (const u64 other = key_hash(pos, !canon); other != key_hash(pos, canon))
+        read_moves(f, count, other, pos, !canon, entries);
+
+    const MoveList<ALL> legal(pos);
+    std::vector<Entry>    ok;
+    for (const Entry& e : entries)
+    {
+        if (!legal.contains(e.move))
+            continue;
+        StateInfo st;
+        pos.do_move(e.move, st);
+        bool             repeats = false;
+        const StateInfo* p       = st.previous;
+        for (int i = 1; p && i <= st.rule60 && !repeats; ++i, p = p->previous)
+            repeats = !(i & 1) && p->key == st.key;
+        pos.undo_move(e.move);
+        if (!repeats)
+            ok.push_back(e);
+    }
+    if (found)
+        *found = ok.size();
+    if (ok.empty())
+        return Move::none();
+
+    int best = ok[0].score;
+    for (const Entry& e : ok)
+        best = std::max(best, e.score);
+    u64 total = 0;
+    for (Entry& e : ok)
+        total += e.games = e.score >= best - ScoreMargin ? std::max<u64>(e.games, 1) : 0;
+
+    static PRNG rng(u64(now()) | 1);
+    u64         r = rng.rand<u64>() % total;
+    for (const Entry& e : ok)
+        if (r < e.games)
+            return e.move;
+        else
+            r -= e.games;
+    return ok[0].move;
+}
+
+}  // namespace Knowledge
 
 }  // namespace
 
@@ -363,6 +546,13 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     // persona, 0 a new random one every time the engine starts (see book_move).
     options.add("Opening Persona", Option(0, 0, 9999));
 
+    // EngineKnowledge: the external book EngineKnowledge.bin (see Knowledge::probe),
+    // at full strength in every Attack Mode but Forced Draw; nothing happens when
+    // the file does not exist. A relative "EngineKnowledge File" is looked for next
+    // to the engine, then in the working directory.
+    options.add("EngineKnowledge", Option(true));
+    options.add("EngineKnowledge File", Option("EngineKnowledge.bin"));
+
     options.add(  //
       "EvalFile", Option(EvalFileDefaultName " var " EvalFileDefaultName, EvalFileDefaultName,
                          [this](const Option&) {
@@ -436,12 +626,29 @@ void Engine::go(Search::LimitsType& limits) {
     if (!limits.infinite && !limits.ponderMode && !limits.forceImproved
         && limits.searchmoves.empty()
         && (limits.use_time_management() || limits.movetime || limits.depth || limits.nodes))
+    {
+        // With a strength handicap (UCI_LimitStrength, TianTian Skill Level or
+        // Skill Level below 20) the human-like book of xqbook.h, otherwise, except
+        // in Forced Draw, EngineKnowledge.bin when the option is on and the file
+        // exists.
+        Move m = Move::none();
         if (const int maxDepth = book_max_depth(options))
-            if (const Move m = book_move(pos, maxDepth, persona_seed(options)))
-            {
-                limits.searchmoves = {UCIEngine::move(m)};
-                limits.depth       = 1;
-            }
+            m = book_move(pos, maxDepth, persona_seed(options));
+        else if (bool(options["EngineKnowledge"])
+                 && Search::Attack::parse(options) != Search::AttackMode::FORCED_DRAW)
+        {
+            usize n = 0;
+            m       = Knowledge::probe(knowledge_path(), pos, &n);
+            if (m)
+                sync_cout << "info string EngineKnowledge: " << UCIEngine::move(m) << " ("
+                          << n << " book move" << (n > 1 ? "s" : "") << ")" << sync_endl;
+        }
+        if (m)
+        {
+            limits.searchmoves = {UCIEngine::move(m)};
+            limits.depth       = 1;
+        }
+    }
 
     // Human rating handicap: a fixed node budget per move, so that the strength
     // does not depend on the hardware or the time control.
@@ -483,6 +690,15 @@ bool Engine::king_probe_eligible(const Search::LimitsType& limits) const {
     const Color us = pos.side_to_move();
     return !pos.checkers() && Search::KingProbe::majors(pos) <= Search::KingProbe::MaxMajors
         && pos.count<ROOK>(us) + pos.count<KNIGHT>(us) + pos.count<CANNON>(us) > 0;
+}
+
+std::filesystem::path Engine::knowledge_path() const {
+    const std::filesystem::path p = path_from_utf8(std::string(options["EngineKnowledge File"]));
+    if (p.is_absolute() || binaryDirectory.empty())
+        return p;
+    std::error_code ec;
+    const auto      beside = binaryDirectory / p;
+    return std::filesystem::exists(beside, ec) ? beside : p;
 }
 
 // `k` is the root of an earlier search of this game: the same position or one
