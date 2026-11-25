@@ -336,6 +336,8 @@ constexpr int DrawPlayCaptureWeight = 2;
 // normal evaluation (mates played at full strength) until the next game.
 inline std::atomic<bool> killerFull{false};
 constexpr TimePoint KillerCheckMs = 1000;  // mate check per move at most
+// Hash of the HumanKiller mate check (allocated on its first use).
+constexpr usize KillerHashMB = 16;
 
 AttackMode parse(const OptionsMap& options);
 }

@@ -143,6 +143,7 @@ class Engine {
     OptionsMap                                        options;
     ThreadPool                                        threads;
     TranspositionTable                                tt;
+    TranspositionTable                                killerTT;  // HumanKiller mate check
     Eval::NNUE::EvalFile                              networkFile;
     LazyNumaReplicatedSystemWide<Eval::NNUE::Network> network;
 

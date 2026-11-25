@@ -20,6 +20,7 @@
 #define TT_H_INCLUDED
 
 #include <tuple>
+#include <utility>
 
 #include "misc.h"
 #include "memory.h"
@@ -110,6 +111,16 @@ class TranspositionTable {
 
     // The hash function; its only external use is memory prefetching
     TTEntry* first_entry(const Key key) const;
+
+    // Exchange the tables (no search may run): a short search can use its own
+    // hash through the same object the workers refer to, with no extra cost in
+    // the search itself.
+    void swap(TranspositionTable& o) noexcept {
+        std::swap(clusterCount, o.clusterCount);
+        std::swap(table, o.table);
+        std::swap(generation8, o.generation8);
+    }
+    bool allocated() const { return table != nullptr; }
 
    private:
     friend struct TTEntry;

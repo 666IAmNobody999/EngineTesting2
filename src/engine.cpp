@@ -754,6 +754,11 @@ void Engine::king_probe_run(Search::LimitsType limits, bool probeOn, bool killer
                               : std::clamp(own / 10, TimePoint(50), Search::Attack::KillerCheckMs);
         done = false, probeMate = false, checkRun = true;
         probePos = nullptr, goodDepth = goodCount = 0;
+        // Its own hash: the normal (unshaped) values of the check and the Bare
+        // King values of the game search never mix.
+        if (!killerTT.allocated())
+            killerTT.resize(Search::Attack::KillerHashMB, threads);
+        tt.swap(killerTT);
         threads.start_thinking(p, st, pl);
         while (!done)
         {
@@ -764,6 +769,7 @@ void Engine::king_probe_run(Search::LimitsType limits, bool probeOn, bool killer
                 threads.stop = true;
         }
         threads.main_thread()->wait_for_search_finished();
+        tt.swap(killerTT);
         probeNodes += threads.nodes_searched();
         checkRun = false;
         if (!checkStopped)
@@ -1074,6 +1080,8 @@ void Engine::search_clear() {
     idle_other_pikafish();
 
     tt.clear(threads);
+    if (killerTT.allocated())
+        killerTT.clear(threads);
     threads.clear();
 }
 
