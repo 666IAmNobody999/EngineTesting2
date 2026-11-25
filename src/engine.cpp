@@ -271,11 +271,18 @@ void read_moves(std::ifstream& f, u64 count, u64 key, const Position& pos, bool 
     }
 }
 
+enum class Mode {
+    BEST_MOVE,
+    NORMAL,
+    FULLY_RANDOM
+};
+
 // The move of the file for `pos`, Move::none() if none (no file, not a book
 // position, no legal move left). Among the legal moves that do not repeat a
-// position of the game, those at most ScoreMargin below the best score are
-// chosen at random in proportion to their games (at least 1).
-Move probe(const std::filesystem::path& file, Position& pos, usize* found) {
+// position of the game: BEST_MOVE picks only the highest score (ties weighted
+// by games, at least 1); NORMAL picks within ScoreMargin below the best score
+// weighted by games; FULLY_RANDOM picks uniformly at random among all of them.
+Move probe(const std::filesystem::path& file, Position& pos, Mode mode, usize* found) {
     constexpr int ScoreMargin = 20;
 
     std::ifstream f(file, std::ios::binary);
@@ -313,15 +320,19 @@ Move probe(const std::filesystem::path& file, Position& pos, usize* found) {
     if (ok.empty())
         return Move::none();
 
+    static PRNG rng(u64(now()) | 1);
+    if (mode == Mode::FULLY_RANDOM)
+        return ok[rng.rand<u64>() % ok.size()].move;
+
     int best = ok[0].score;
     for (const Entry& e : ok)
         best = std::max(best, e.score);
-    u64 total = 0;
+    const int margin = mode == Mode::NORMAL ? ScoreMargin : 0;
+    u64       total  = 0;
     for (Entry& e : ok)
-        total += e.games = e.score >= best - ScoreMargin ? std::max<u64>(e.games, 1) : 0;
+        total += e.games = e.score >= best - margin ? std::max<u64>(e.games, 1) : 0;
 
-    static PRNG rng(u64(now()) | 1);
-    u64         r = rng.rand<u64>() % total;
+    u64 r = rng.rand<u64>() % total;
     for (const Entry& e : ok)
         if (r < e.games)
             return e.move;
@@ -552,6 +563,8 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     // to the engine, then in the working directory.
     options.add("EngineKnowledge", Option(true));
     options.add("EngineKnowledge File", Option("EngineKnowledge.bin"));
+    options.add("Knowledge Mode",
+                Option("BestMove var BestMove var Normal var FullyRandom", "BestMove"));
 
     options.add(  //
       "EvalFile", Option(EvalFileDefaultName " var " EvalFileDefaultName, EvalFileDefaultName,
@@ -637,8 +650,11 @@ void Engine::go(Search::LimitsType& limits) {
         else if (bool(options["EngineKnowledge"])
                  && Search::Attack::parse(options) != Search::AttackMode::FORCED_DRAW)
         {
-            usize n = 0;
-            m       = Knowledge::probe(knowledge_path(), pos, &n);
+            const auto km = options["Knowledge Mode"] == "Normal"      ? Knowledge::Mode::NORMAL
+                          : options["Knowledge Mode"] == "FullyRandom" ? Knowledge::Mode::FULLY_RANDOM
+                                                                       : Knowledge::Mode::BEST_MOVE;
+            usize      n  = 0;
+            m             = Knowledge::probe(knowledge_path(), pos, km, &n);
             if (m)
                 sync_cout << "info string EngineKnowledge: " << UCIEngine::move(m) << " ("
                           << n << " book move" << (n > 1 ? "s" : "") << ")" << sync_endl;
