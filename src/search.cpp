@@ -1882,8 +1882,8 @@ moves_loop:  // When in check, search starts here
     int moveCount = 0;
 
     // Cannon + Knight vs single Rook endgame enhancement (only triggers for CN vs R)
-    const bool cnVsR = pos.count<ROOK>(us) == 0 && pos.count<CANNON>(us) == 1
-                    && pos.count<KNIGHT>(us) == 1 && pos.count<ROOK>(~us) == 1
+    const bool cnVsR = pos.count<ROOK>(us) == 0 && pos.count<ROOK>(~us) == 1
+                    && pos.count<CANNON>(us) == 1 && pos.count<KNIGHT>(us) == 1
                     && pos.count<CANNON>(~us) == 0 && pos.count<KNIGHT>(~us) == 0;
 
     // Step 14. Loop through all legal moves until no moves remain
@@ -1992,8 +1992,7 @@ moves_loop:  // When in check, search starts here
                 // (*Scaler): Generally, more frequent futility pruning scales well
                 if (!ss->inCheck && lmrDepth < 10 && futilityValue <= alpha)
                 {
-                    if (bestValue <= futilityValue && !is_decisive(bestValue)
-                        && !is_win(futilityValue))
+                    if (bestValue <= futilityValue && !is_win(futilityValue))
                         bestValue = futilityValue;
                     continue;
                 }

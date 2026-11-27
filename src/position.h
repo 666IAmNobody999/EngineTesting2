@@ -165,6 +165,9 @@ struct StateInfo {
     i16   check10[COLOR_NB];
     int   rule60;
     int   pliesFromNull;
+    // Cached repetition look-behind window (resets on capture or null move;
+    // occupies the 4-byte alignment padding before `key`, so sizeof(StateInfo) is unchanged).
+    int   repWindow;
 
     // Not copied when making a move (will be recomputed anyhow)
     Key        key;

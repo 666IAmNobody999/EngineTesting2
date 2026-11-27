@@ -692,6 +692,7 @@ void Position::do_move(Move                      m,
             ++st->rule60;
     }
     ++st->pliesFromNull;
+    ++st->repWindow;
 
     auto& dts = dirties.dirtyThreats;
     auto& dp  = dirties.dirtyPiece;
@@ -738,9 +739,9 @@ void Position::do_move(Move                      m,
         // Update hash key
         k ^= Zobrist::psq[captured][capsq];
 
-        // Reset rule 60 counter
+        // Reset rule 60 counter and repetition window
         st->check10[WHITE] = st->check10[BLACK] = RuleConfig::check_base();
-        st->rule60                              = 0;
+        st->rule60 = st->repWindow = 0;
     }
     else
         dp.remove_sq = SQ_NONE;
@@ -1045,6 +1046,7 @@ void Position::do_null_move(StateInfo& newSt) {
     st->key ^= Zobrist::side;
 
     st->pliesFromNull = 0;
+    st->repWindow     = 0;
 
     st->capturedPiece = NO_PIECE;
     st->skyCapturedId = 0;
@@ -2800,9 +2802,7 @@ Value Position::detect_chases(int d, int ply) {
 // Only called at the root children after rule_judge() returned a draw, so it
 // costs nothing on the normal search path.
 bool Position::idle_repetition() const {
-    int end = std::min(st->rule60 + std::max(0, st->check10[WHITE] - 10)
-                         + std::max(0, st->check10[BLACK] - 10),
-                       st->pliesFromNull);
+    const int end = st->repWindow;
     if (end < 4)
         return false;
 
@@ -2860,11 +2860,8 @@ bool Position::rule_judge(Value& result, int ply) {
         return true;
     }
 
-    // Restore rule 60 by adding back the checks. Captures/null moves still bound the
-    // repetition history even when the natural-move draw itself is disabled.
-    int end = std::min(st->rule60 + std::max(0, st->check10[WHITE] - 10)
-                         + std::max(0, st->check10[BLACK] - 10),
-                       st->pliesFromNull);
+    // Cached repetition window: plies since last capture or null move (5723786e).
+    const int end = st->repWindow;
 
     if (end >= 4 && filter[st->key] >= 1)
     {
