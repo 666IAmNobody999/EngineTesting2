@@ -51,8 +51,8 @@ using namespace Attacks;
 
 namespace RuleConfig {
 // Defaults: AsianRule with rule120, Sixty Move Rule on.
-// AsianRule/SkyRule/ChineseRule/YiTianRule all couple to rule120 and keep the
-// Sixty Move Rule on (enforced in engine.cpp couplings).
+// AsianRule/SkyRule/ChineseRule/QiZheRule keep the Sixty Move Rule on;
+// YiTianRule completely disables it (弈天需手动提和，防止超过 120 步后误判和而送子).
 RepetitionRule repetitionRule  = RepetitionRule::ASIAN;
 DrawRule       drawRule        = DrawRule::NONE;
 int            mateThreatDepth = 1;
@@ -69,11 +69,14 @@ int            rule60EvalDiv   = 244;
 int            checkCap        = 10;
 
 void refresh_rule60() {
-    const int maxPly = std::max(1, rule60MaxPly);
-    rule60Limit      = sixtyMoveRule ? maxPly : RULE60_UNLIMITED;
+    // YiTianRule：弈天棋缘需手动提和，挂机对局常超过 120 步，故完全关闭自然限著
+    // （仍保留 400 步总步数自动判和），防止 120 步后所有非吃子着法被判和而送子。
+    const bool enabled = sixtyMoveRule && repetitionRule != RepetitionRule::YITIAN;
+    const int  maxPly  = std::max(1, rule60MaxPly);
+    rule60Limit        = enabled ? maxPly : RULE60_UNLIMITED;
     // With the rule off keep the upstream rule-120 shape for the TT buckets and the
     // evaluation damping instead of letting the counter run away.
-    rule60KeyCap  = sixtyMoveRule ? maxPly : 120;
+    rule60KeyCap  = enabled ? maxPly : 120;
     rule60EvalDiv = 2 * rule60KeyCap + 4;
 }
 }  // namespace RuleConfig

@@ -452,18 +452,14 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
                  // QiZheRule：自然著限判断中双方将军最多只计算 20 回合。
                  RuleConfig::checkCap = RuleConfig::repetitionRule == RR::QIZHE ? 20 : 10;
 
-                 // Couplings for AsianRule, SkyRule, ChineseRule and YiTianRule:
-                 // all four rules use rule120 (弈天规则 26：无吃子着数达到 120 步判和；
-                 // 亚象联第四节：双方共走 120 步未有去子作和), Rule60MaxPly stays freely
-                 // adjustable 90-150, and the
-                 // Sixty Move Rule is switched on for all three rules. The
-                 // coupled options are assigned through the OptionsMap so that
-                 // GUIs reflect the new defaults and the options' own callbacks
-                 // keep RuleConfig in sync.
+                 // Couplings for AsianRule, SkyRule, ChineseRule, QiZheRule and YiTianRule:
+                 // AsianRule/SkyRule/ChineseRule use rule120, QiZheRule uses rule80, and
+                 // all four switch Sixty Move Rule on. YiTianRule completely disables
+                 // Sixty Move Rule (弈天需手动提和，超过 120 步继续走时若开启会令所有
+                 // 非吃子着法被判和而送子；400 步总步数上限仍保留)。
                  if (RuleConfig::repetitionRule == RR::ASIAN
                      || RuleConfig::repetitionRule == RR::SKY
-					 || RuleConfig::repetitionRule == RR::CHINESE
-                     || RuleConfig::repetitionRule == RR::YITIAN
+                     || RuleConfig::repetitionRule == RR::CHINESE
                      || RuleConfig::repetitionRule == RR::QIZHE)
                  {
                      // QiZheRule（棋者象棋）：自然著限 40 回合，即 80 步。
@@ -478,6 +474,14 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
                          it != options.options_map.end())
                          it->second = std::string("true");
                  }
+                 else if (RuleConfig::repetitionRule == RR::YITIAN)
+                 {
+                     if (auto it = options.options_map.find("Sixty Move Rule");
+                         it != options.options_map.end())
+                         it->second = std::string("false");
+                 }
+
+                 RuleConfig::refresh_rule60();
 
                  return std::nullopt;
              }));
@@ -504,10 +508,9 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
 
     options.add(  //
       "Sixty Move Rule", Option(true, [](const Option& o) {
-          // The natural-move draw defaults on for every rule (including
-          // YiTianRule) and can be freely toggled by the GUI; selecting
-          // AsianRule/SkyRule/YiTianRule always switches it back on via the
-          // Repetition Rule coupling.
+          // The natural-move draw defaults on for non-YiTian rules and can be
+          // freely toggled by the GUI; YiTianRule always forces it off in
+          // RuleConfig::refresh_rule60() even if a GUI re-sends true.
           RuleConfig::sixtyMoveRule = int(o) != 0;
           RuleConfig::refresh_rule60();
           return std::nullopt;
