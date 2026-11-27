@@ -127,13 +127,11 @@ class Engine {
     void avoid_sixty_move_draw(Search::LimitsType& limits);
     void choose_search_algorithm(Search::LimitsType& limits);
     void new_game_state();
-    // King_Probe (帥位試探, see Search::KingProbe)
-    bool king_probe_eligible(const Search::LimitsType& limits) const;
-    void king_probe_run(Search::LimitsType limits, bool probe, bool killerCheck);
+    void killer_check_run(Search::LimitsType limits);
     bool killer_check_needed(const Search::LimitsType& limits);
     bool from_game(Key k, int plies, bool exact) const;
     std::filesystem::path knowledge_path() const;
-    void king_probe_join();
+    void killer_check_join();
     const std::filesystem::path binaryDirectory;
 
     NumaReplicationContext numaContext;
@@ -158,25 +156,16 @@ class Engine {
     bool      sixtyFastGame = false;  // 0-1 s per move, 1 min + 0 game or analysis
     int       gameLastPly  = -1;
 
-    // King_Probe: allowed by the time control of this go (analysis, or Ponder
-    // on except 0-1 s per move and games of at most 5 minutes)
-    bool        kingProbeTimeOk = false;
-    std::thread kpThread;          // probes, then starts the real search
+    // HumanKiller mate check thread state
+    std::thread kpThread;          // checks for a mate, then starts the real search
     std::mutex  kpMutex;
     bool        kpProbing   = false;  // the real search has not started yet
-    bool        kpAbort     = false;  // stop / position received while probing
-    bool        kpPonderhit = false;  // ponderhit received while probing
+    bool        kpAbort     = false;  // stop / position received while checking
+    bool        kpPonderhit = false;  // ponderhit received while checking
     TimePoint   kpPonderhitTime = 0;
-    // Last result, reused while the material stays the same
-    bool   kpCached    = false;
-    Color  kpCacheUs   = WHITE;
-    Key    kpCacheKey  = 0;        // root of the search that stored it
-    u64    kpCacheMat  = 0;
-    Square kpCacheSq   = SQ_NONE;  // SQ_NONE: no target found
-    int    kpCacheSkip = 0;        // searches left before probing again after a miss
-    bool   kpPrevValid = false;    // side to move of the previous search
-    Color  kpPrevUs    = WHITE;
-    Key    kpPrevKey   = 0;        // root of the previous search
+    bool        kpPrevValid = false;  // side to move of the previous search
+    Color       kpPrevUs    = WHITE;
+    Key         kpPrevKey   = 0;      // root of the previous search
     // HumanKiller: the mate check of the previous move saw a mate for us
     bool   killerPrevMate = false;
     Key    killerPrevKey  = 0;

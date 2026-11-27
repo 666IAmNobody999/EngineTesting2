@@ -324,13 +324,9 @@ bool Search::Worker::iterative_deepening() {
     if (skill.enabled())
         multiPV = std::max(multiPV, skill.elo ? Skill::human_multipv(skill.elo) : usize(4));
 
-    rootColor  = rootPos.side_to_move();
-    attackMode = limits.killerCheck ? AttackMode::BEST_MOVE : Attack::parse(options);
-    kpActive   = KingProbe::current.active && KingProbe::current.us == rootColor
-            && !limits.killerCheck;
-    kpTarget   = KingProbe::current.sq;
-    kpSig      = KingProbe::current.sig;
-    evalShaping = kpActive || Attack::bare_king(attackMode);
+    rootColor   = rootPos.side_to_move();
+    attackMode  = limits.killerCheck ? AttackMode::BEST_MOVE : Attack::parse(options);
+    evalShaping = Attack::bare_king(attackMode);
     // Forced Draw looks for draws on purpose, so it keeps repetitions.
     // The other modes avoid a repetition only while clearly better (see below).
     avoidRepetitionOpt = bool(options["Avoid_Repetition"]) && attackMode != AttackMode::FORCED_DRAW;
@@ -360,7 +356,7 @@ bool Search::Worker::iterative_deepening() {
     const bool  altRotate = true;
 
     // Tell the GUI which search is actually used for this go (not in bench).
-    if (is_mainthread() && !limits.forceImproved && !limits.kingProbe && !limits.killerCheck)
+    if (is_mainthread() && !limits.forceImproved && !limits.killerCheck)
         sync_cout << "info string Search Algorithm: "
                   << (!altLine                                      ? "Original"
                       : algo == SearchAlgorithm::IMPROVED_MULTIPV3 ? "ImprovedMultiPV3"
@@ -1885,6 +1881,11 @@ moves_loop:  // When in check, search starts here
 
     int moveCount = 0;
 
+    // Cannon + Knight vs single Rook endgame enhancement (only triggers for CN vs R)
+    const bool cnVsR = pos.count<ROOK>(us) == 0 && pos.count<CANNON>(us) == 1
+                    && pos.count<KNIGHT>(us) == 1 && pos.count<ROOK>(~us) == 1
+                    && pos.count<CANNON>(~us) == 0 && pos.count<KNIGHT>(~us) == 0;
+
     // Step 14. Loop through all legal moves until no moves remain
     // or a beta cutoff occurs.
     while ((move = mp.next_move()) != Move::none())
@@ -1897,6 +1898,14 @@ moves_loop:  // When in check, search starts here
         // At root obey the "searchmoves" option and skip moves not listed in Root Move List.
         // In MultiPV mode we also skip PV moves that have been already searched.
         if (rootNode && !std::count(rootMoves.begin() + pvIdx, rootMoves.begin() + pvLast, move))
+            continue;
+
+        // In CN vs R endgames, avoid trading Cannon/Knight for a defended Rook
+        if (cnVsR && !ss->inCheck && (!rootNode || rootMoves.size() > 1) && pos.capture(move)
+            && type_of(pos.piece_on(move.to_sq())) == ROOK
+            && (type_of(pos.moved_piece(move)) == CANNON
+                || type_of(pos.moved_piece(move)) == KNIGHT)
+            && (pos.attackers_to(move.to_sq(), pos.pieces() ^ move.from_sq()) & pos.pieces(~us)))
             continue;
 
         ss->moveCount = ++moveCount;
@@ -1927,7 +1936,12 @@ moves_loop:  // When in check, search starts here
 
         // Step 15. Pruning at shallow depths.
         // Depth conditions are important for mate finding.
-        if (!rootNode && pos.major_material(us) && !is_loss(bestValue))
+        const bool cnVsRKeyPiece =
+          cnVsR
+          && (type_of(movedPiece) == KING || type_of(movedPiece) == CANNON
+              || type_of(movedPiece) == KNIGHT);
+
+        if (!rootNode && pos.major_material(us) && !is_loss(bestValue) && !cnVsRKeyPiece)
         {
             // Skip quiet moves if movecount exceeds our threshold
             if (moveCount >= (3 + depth * depth) / (2 - improving))
@@ -2117,6 +2131,15 @@ moves_loop:  // When in check, search starts here
 
         // Decrease/increase reduction for moves with a good/bad history
         r -= ss->statScore * 956 / 8192;
+
+        // In CN vs R endgames, search King/Cannon/Knight maneuvers deeper and reduce Bishop/Advisor shuffles
+        if (cnVsR && !capture)
+        {
+            if (cnVsRKeyPiece)
+                r -= 2048;
+            else if (type_of(movedPiece) == BISHOP || type_of(movedPiece) == ADVISOR)
+                r += 1024;
+        }
 
         if (!capture && !is_decisive(alpha))
             r += 3 * std::clamp(alpha - eval, -65, 92);
@@ -2676,25 +2699,8 @@ Value Search::Worker::evaluate(const Position& pos) {
     Value v = Eval::evaluate(network[numaAccessToken], pos, accumulatorStack, refreshTable);
     if (!evalShaping) [[likely]]
         return v;
-    if (kpActive)
-        v = king_probe_shape(v, pos);
     return Attack::bare_king(attackMode) ? attack_shape_eval(v, pos) : v;
 }
-
-
-// King_Probe: bonus for the root side while no rook / knight / cannon has left
-// the board since the root, growing as its king gets closer to the target.
-Value Search::Worker::king_probe_shape(Value v, const Position& pos) const {
-    if (std::abs(v) > KingProbe::Window || KingProbe::major_sig(pos) != kpSig)
-        return v;
-    const Square k = pos.king_square(rootColor);
-    const int    d = std::abs(int(file_of(k)) - int(file_of(kpTarget)))
-                + std::abs(int(rank_of(k)) - int(rank_of(kpTarget)));
-    const Value  b = KingProbe::Keep + KingProbe::Step * std::max(0, 4 - d);
-    return pos.side_to_move() == rootColor ? v + b : v - b;
-}
-
-Search::KingProbe::Target Search::KingProbe::current;
 
 
 AttackMode Search::Attack::parse(const OptionsMap& options) {
