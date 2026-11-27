@@ -109,10 +109,14 @@ inline void sky_publish(StateInfo* s, u16 victims, u16 checkers, u16 chasers,
 
 // 天天象棋 identity of a checking piece for the 连将 counters: a cannon whose screen
 // (炮架) is the piece that just moved (to) is a check by that moved piece (e.g. a cannon
-// moving in front of the other cannon, 重炮); otherwise the checking piece itself
-// (also for a discovered check, 闪将). A checker can only have pieces between it and
-// the king when it is a cannon.
-inline Square sky_check_owner(Square checker, Square king, Square to) {
+// moving in front of the other cannon, 重炮), UNLESS the moved piece itself is already
+// checking the king (double check such as 炮车双将, 棋例13, where both checking pieces
+// must keep their own identities); otherwise the checking piece itself (also for a
+// discovered check, 闪将). A checker can only have pieces between it and the king when it
+// is a cannon.
+inline Square sky_check_owner(Square checker, Square king, Square to, Bitboard allChecks) {
+    if (allChecks & to)
+        return checker;
     const int cf = file_of(checker), cr = rank_of(checker), kf = file_of(king),
               kr = rank_of(king), tf = file_of(to), tr = rank_of(to);
     const bool screen = cf == kf ? tf == cf && (tr - cr) * (tr - kr) < 0
@@ -1621,7 +1625,8 @@ int Position::sky_records(SkyMoveRecord* out, int maxPlies, int killParity) {
             while (checks)
             {
                 const Square sq = pop_lsb(checks);
-                r.checkers |= u16(1u << scratch.idBoard[sky_check_owner(sq, ksq, cur->move.to_sq())]);
+                r.checkers |= u16(1u << scratch.idBoard[sky_check_owner(sq, ksq, cur->move.to_sq(),
+                                                                        cur->checkersBB)]);
                 r.altCheckers |= u16(1u << scratch.idBoard[sq]);
             }
         }
@@ -2054,7 +2059,9 @@ int Position::sky_check_run_limit(bool prev) const {
         u16      cur = 0;
         Bitboard b   = p->checkersBB;
         while (b)
-            cur |= u16(1u << (id[sky_check_owner(pop_lsb(b), ksq[checked], p->move.to_sq())] & 15));
+            cur |= u16(1u << (id[sky_check_owner(pop_lsb(b), ksq[checked], p->move.to_sq(),
+                                                 p->checkersBB)]
+                              & 15));
         if (cur & newer)
             return 6;  // 一子长将
         ids |= cur;
@@ -2108,7 +2115,8 @@ void Position::set_sky_info(int d) {
             while (checks)
             {
                 const Square sq = pop_lsb(checks);
-                checkers |= u16(1u << idBoard[sky_check_owner(sq, ksq, cur->move.to_sq())]);
+                checkers |=
+                  u16(1u << idBoard[sky_check_owner(sq, ksq, cur->move.to_sq(), cur->checkersBB)]);
                 altCheckers |= u16(1u << idBoard[sq]);
             }
 
