@@ -135,9 +135,10 @@ struct SkyChaseMap {
 
 // One move of the game history as seen by the SkyRule counters.
 struct SkyMoveRecord {
-    u16  checkers;  // identities of the checking pieces (check moves)
-    u16  victims;   // newly chased victims (also for a check that chases)
-    u16  chasers;   // identities of the chasing pieces
+    u16  checkers;     // identities of the checking pieces (check moves, sky_check_owner)
+    u16  altCheckers;  // actual checking piece identities (for multi-piece 将捉 counting)
+    u16  victims;      // newly chased victims (also for a check that chases)
+    u16  chasers;      // identities of the chasing pieces
     bool check;
     bool capture;
     bool evasion;  // the mover was in check before the move
@@ -195,6 +196,7 @@ struct StateInfo {
     // superset filled by rule_judge(), exact for the game history).
     u8         skyCheckRun;
     u8         skyMaybeRun;
+    u16        skyAltCheckers;  // actual checking piece IDs (fits in 2-byte tail padding)
 };
 
 

@@ -95,9 +95,11 @@ inline bool sky_cached(const StateInfo* s) {
 #endif
 }
 
-inline void sky_publish(StateInfo* s, u16 victims, u16 checkers, u16 chasers) {
-    s->skyVictims  = victims;
-    s->skyCheckers = checkers;
+inline void sky_publish(StateInfo* s, u16 victims, u16 checkers, u16 chasers,
+                        u16 altCheckers = 0) {
+    s->skyVictims     = victims;
+    s->skyCheckers    = checkers;
+    s->skyAltCheckers = altCheckers;
 #if defined(__GNUC__) || defined(__clang__)
     __atomic_store_n(&s->skyChasers, chasers, __ATOMIC_RELEASE);
 #else
@@ -120,9 +122,10 @@ inline Square sky_check_owner(Square checker, Square king, Square to) {
 }
 
 inline void sky_invalidate(StateInfo* s) {
-    s->skyVictims  = 0;
-    s->skyCheckers = 0;
-    s->skyChasers  = SKY_UNCOMPUTED;
+    s->skyVictims     = 0;
+    s->skyCheckers    = 0;
+    s->skyAltCheckers = 0;
+    s->skyChasers     = SKY_UNCOMPUTED;
 }
 
 }  // namespace
@@ -1337,8 +1340,29 @@ SkyChaseMap Position::sky_chased(Color c) {
             if (attackerType == type_of(piece_on(to)))
             {
                 sideToMove = ~sideToMove;
-                if ((attackerType == KNIGHT && ((between_bb(from, to) ^ to) & pieces()))
-                    || !chase_legal(Move(to, from), checkThem))
+                bool isChase = (attackerType == KNIGHT && ((between_bb(from, to) ^ to) & pieces()))
+                            || !chase_legal(Move(to, from), checkThem);
+                // 有根同类子捉无根同类子（如棋例6有根炮捉无根炮）：对方反吃后我方能吃回，仍算捉。
+                if (!isChase)
+                {
+                    Bitboard backRecap =
+                      attackers_to(from, (pieces() ^ to) | from) & pieces(~sideToMove);
+                    if (backRecap)
+                    {
+                        const auto [captured, id] = do_move(Move(to, from));
+                        while (backRecap)
+                        {
+                            Square sq = pop_lsb(backRecap);
+                            if (chase_legal(Move(sq, from), checkUs))
+                            {
+                                isChase = true;
+                                break;
+                            }
+                        }
+                        undo_move(Move(to, from), captured, id);
+                    }
+                }
+                if (isChase)
                     chase.add(idBoard[to], attackerId);
                 sideToMove = ~sideToMove;
             }
@@ -1595,8 +1619,11 @@ int Position::sky_records(SkyMoveRecord* out, int maxPlies, int killParity) {
             Bitboard     checks = cur->checkersBB;
             const Square ksq    = scratch.king_square(scratch.sideToMove);
             while (checks)
-                r.checkers |= u16(1u << scratch.idBoard[sky_check_owner(
-                                  pop_lsb(checks), ksq, cur->move.to_sq())]);
+            {
+                const Square sq = pop_lsb(checks);
+                r.checkers |= u16(1u << scratch.idBoard[sky_check_owner(sq, ksq, cur->move.to_sq())]);
+                r.altCheckers |= u16(1u << scratch.idBoard[sq]);
+            }
         }
 
         if (r.capture)
@@ -1704,7 +1731,7 @@ struct SkyCounters {
             checkIds |= r.checkers;
             exceeded |= ++checkRun > sky_check_limit(checkRepeat, checkIds);
             ++alt;
-            altIds |= r.checkers;
+            altIds |= r.checkers | r.altCheckers;
             altCheck = true;
         }
         else if (r.kill)
@@ -1728,7 +1755,9 @@ struct SkyCounters {
             for (int id = 0; id < 16; ++id)
                 chaseCnt[id] = (r.victims >> id & 1) ? next : 0;
             exceeded |= !r.evasion && next > 6;
-            ++alt;
+            // 应将产生的捉算捉，但将捉计数器不上升（棋例9）。
+            if (!r.evasion)
+                ++alt;
             altIds |= r.chasers;
             altChase = true;
         }
@@ -1954,11 +1983,12 @@ bool Position::sky_chase_verify(int run) {
     {
         const StateInfo* p = chain[i];
         SkyMoveRecord    r{};
-        r.check    = bool(p->checkersBB);
-        r.evasion  = bool(p->previous->checkersBB);
-        r.checkers = r.check ? p->skyCheckers : 0;
-        r.victims  = r.check ? p->skyChasers : p->skyVictims;
-        r.chasers  = r.check ? 0 : p->skyChasers;
+        r.check       = bool(p->checkersBB);
+        r.evasion     = bool(p->previous->checkersBB);
+        r.checkers    = r.check ? p->skyCheckers : 0;
+        r.altCheckers = r.check ? p->skyAltCheckers : 0;
+        r.victims     = r.check ? p->skyChasers : p->skyVictims;
+        r.chasers     = r.check ? 0 : p->skyChasers;
         exceeded   = c.step(r);
     }
     return exceeded;
@@ -2072,19 +2102,22 @@ void Position::set_sky_info(int d) {
         // In the target SkyRule, a checking move is not simultaneously counted as a chase.
         if (cur->checkersBB)
         {
-            u16          checkers = 0;
+            u16          checkers = 0, altCheckers = 0;
             Bitboard     checks   = cur->checkersBB;
             const Square ksq      = king_square(sideToMove);
             while (checks)
-                checkers |= u16(1u << idBoard[sky_check_owner(pop_lsb(checks), ksq,
-                                                              cur->move.to_sq())]);
+            {
+                const Square sq = pop_lsb(checks);
+                checkers |= u16(1u << idBoard[sky_check_owner(sq, ksq, cur->move.to_sq())]);
+                altCheckers |= u16(1u << idBoard[sq]);
+            }
 
             // 将捉同时出现: the victims chased by the checking move itself.
             SkyChaseMap after = sky_chased(mover);
             undo_move(cur->move, NO_PIECE, 0);
             st = cur->previous;
             SkyChaseMap before = sky_chased(mover);
-            sky_publish(cur, 0xFFFF, checkers, after.exact_diff(before).victims());
+            sky_publish(cur, 0xFFFF, checkers, after.exact_diff(before).victims(), altCheckers);
             continue;
         }
 
@@ -2231,7 +2264,7 @@ Value Position::detect_sky_cycle(int d, int ply) {
         if (checked(x))
         {
             anyCheck[side] = true;
-            identities[side] |= x->skyCheckers;
+            identities[side] |= x->skyCheckers | x->skyAltCheckers;
         }
         else
         {
@@ -2373,7 +2406,8 @@ Value Position::detect_sky_cycle(int d, int ply) {
             {
                 if (killStart ? !checked(all[i]) && all[i]->skyCheckers : pure_check(all[i]))
                     firstCheck = i;
-                ids |= checked(all[i]) ? all[i]->skyCheckers : all[i]->skyChasers;
+                ids |= checked(all[i]) ? (all[i]->skyCheckers | all[i]->skyAltCheckers)
+                                       : all[i]->skyChasers;
             }
 
             int chasesBefore = 0, mixedBefore = 0;
@@ -2394,29 +2428,57 @@ Value Position::detect_sky_cycle(int d, int ply) {
         return loss_for(mixed ? BColor : AColor);
     }
 
-    // 2. Check/chase alternation on both sides: the side that started first changes
-    //    (a check that also chases does not start the streak); otherwise 1 piece ->
-    //    12 moves, more -> 18 moves, the tighter limit changes, equal limits are a draw.
+    // 2. Check/chase alternation on both sides: replay each side's alternation
+    //    counter (checks and non-evasion chases count +1; evasion chases keep the
+    //    streak alive without incrementing the counter, 棋例9). 1 piece -> 12
+    //    moves, more -> 18 moves; the side that exhausts its counter first changes,
+    //    equal timing is a draw.
     if (mixedA)
     {
         load_ext();
-        int extra[2];
+        auto alt_counts = [](const StateInfo* x) {
+            return bool(x->checkersBB) || !x->previous->checkersBB;
+        };
+        int extra[2] = {0, 0}, cycleCnt[2] = {0, 0}, limit[2] = {12, 12};
         for (int side = 0; side < 2; ++side)
         {
             int oldest = streak_oldest(side, offends);
             while (oldest >= d && checked(all[oldest]) && !pure_check(all[oldest]))
                 oldest -= 2;
-            extra[side] = oldest >= d ? (oldest - d - side) / 2 + 1 : 0;
+            u16 ids = identities[side];
+            for (int i = d + side; i <= oldest; i += 2)
+            {
+                extra[side] += alt_counts(all[i]);
+                ids |= checked(all[i]) ? (all[i]->skyCheckers | all[i]->skyAltCheckers)
+                                       : all[i]->skyChasers;
+            }
+            for (int i = side; i < d; i += 2)
+                cycleCnt[side] += alt_counts(q[i]);
+            limit[side] = (ids & u16(ids - 1)) ? 18 : 12;
         }
-        if (extra[0] != extra[1])
-            return loss_for(extra[0] > extra[1] ? AColor : BColor);
+        if (extra[0] == extra[1] && cycleCnt[0] == cycleCnt[1] && limit[0] == limit[1])
+            return VALUE_DRAW;
 
-        auto       multi  = [](u16 ids) { return bool(ids & u16(ids - 1)); };
-        const bool multiA = multi(identities[0]);
-        const bool multiB = multi(identities[1]);
-        if (multiA != multiB)
-            return loss_for(multiA ? BColor : AColor);
-        return VALUE_DRAW;
+        int when[2];
+        for (int side = 0; side < 2; ++side)
+        {
+            if (cycleCnt[side] == 0)
+            {
+                when[side] = INT_MAX;
+                continue;
+            }
+            int need = limit[side] + 1 - extra[side], t = 0;
+            for (int rep = 0; need > 0 && rep < 20; ++rep)
+                for (int i = d - 2 + side; i >= 0 && need > 0; i -= 2)
+                {
+                    ++t;
+                    need -= alt_counts(q[i]);
+                }
+            when[side] = need > 0 ? INT_MAX : side ? 2 * t - 1 : 2 * t;
+        }
+        if (when[0] == when[1])
+            return VALUE_DRAW;
+        return loss_for(when[0] < when[1] ? AColor : BColor);
     }
 
     // No common victim on either side. The target has one Sky-only exception for a split
