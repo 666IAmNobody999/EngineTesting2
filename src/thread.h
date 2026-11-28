@@ -168,11 +168,15 @@ class ThreadPool {
     auto size() const noexcept { return threads.size(); }
     auto empty() const noexcept { return threads.empty(); }
 
+    void sync_core_pins();
+
    private:
     StateListPtr                         setupStates;
     std::vector<std::unique_ptr<Thread>> threads;
     std::vector<NumaIndex>               boundThreadToNumaNode;
     std::vector<int>                     corePins;
+    bool                                 allowCorePins   = false;
+    bool                                 corePinsApplied = false;
 
     u64 accumulate(RelaxedAtomic<u64> Search::Worker::* member) const {
 

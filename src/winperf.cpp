@@ -46,6 +46,11 @@ std::vector<int> select_physical_cores(std::vector<PhysicalCore> cores, std::siz
 
 namespace Stockfish::WinPerf {
 
+bool is_engine_match() { return false; }
+bool refresh_engine_match_mode() { return false; }
+bool prepare_for_search() { return false; }
+bool real_play_active() { return false; }
+
 void apply_process_tuning() {}
 void acquire_power_plan() {}
 void release_power_plan() {}
@@ -55,6 +60,7 @@ void boost_chess_guis() {}
 void ensure_lock_pages_right() {}
 bool run_lock_pages_helper(int, char*[]) { return false; }
 std::vector<int> plan_physical_core_pins(std::size_t) { return {}; }
+std::vector<int> plan_all_logical_cpus(std::size_t) { return {}; }
 bool             pin_current_thread(int) { return false; }
 
 }  // namespace Stockfish::WinPerf
@@ -836,6 +842,204 @@ void boost_chess_guis() {
     CloseHandle(snap);
 }
 
+// ---------------------------------------------------------------------------
+// Engine Match / League Detection
+// ---------------------------------------------------------------------------
+// Detects when this process is running in a same-machine engine match / league:
+//   1. Parent process is a known match/league manager (cutechess, fastchess,
+//      arena, banksia, openbench, sprt, c-chess-cli, xboard, winboard, fishtest),
+//   2. OR the same non-shell parent process (e.g. Shark Chess, BHGUI, Pengfei)
+//      has at least one other windowless, non-system sibling executable running
+//      under the same user (another chess engine).
+// Once detected, engine-match mode latches for this process so transient
+// opponent restarts between games never trigger real-play tuning.
+namespace {
+
+std::atomic<bool> engineMatchLatched{false};
+std::atomic<bool> realPlayTuningActive{false};
+
+constexpr const wchar_t* LeagueParents[] = {L"cutechess", L"fastchess", L"arena",    L"banksia",
+                                            L"openbench", L"sprt",      L"c-chess-cli", L"xboard",
+                                            L"winboard",  L"fishtest"};
+
+bool league_parent_name(const std::wstring& exeLower) {
+    for (const wchar_t* n : LeagueParents)
+        if (exeLower.find(n) != std::wstring::npos)
+            return true;
+    return false;
+}
+
+constexpr const wchar_t* ShellParents[] = {
+  L"explorer.exe",    L"cmd.exe",      L"powershell.exe", L"pwsh.exe",     L"windowsterminal.exe",
+  L"conhost.exe",     L"openconsole.exe", L"bash.exe",    L"sh.exe",       L"svchost.exe",
+  L"services.exe",    L"wininit.exe"};
+
+bool shell_parent_name(const std::wstring& exeLower) {
+    for (const wchar_t* n : ShellParents)
+        if (exeLower == n)
+            return true;
+    return false;
+}
+
+constexpr const wchar_t* NonEngineSiblings[] = {
+  L"conhost.exe",    L"openconsole.exe", L"cmd.exe",     L"powershell.exe", L"pwsh.exe",
+  L"msedgewebview",  L"webview",         L"crashpad",    L"werfault.exe",   L"updater",
+  L"autoupdate",     L"7z.exe",          L"curl.exe",    L"adb.exe",        L"scrcpy.exe",
+  L"ffmpeg.exe",     L"python.exe",      L"node.exe"};
+
+bool non_engine_sibling_name(const std::wstring& exeLower) {
+    for (const wchar_t* n : NonEngineSiblings)
+        if (exeLower.find(n) != std::wstring::npos)
+            return true;
+    return false;
+}
+
+bool is_system_dir_path(const std::wstring& pathLower) {
+    return pathLower.find(L"\\windows\\system32\\") != std::wstring::npos
+        || pathLower.find(L"\\windows\\syswow64\\") != std::wstring::npos;
+}
+
+void ensure_normal_priority_if_lowered() {
+    HANDLE      proc = GetCurrentProcess();
+    const DWORD pc   = GetPriorityClass(proc);
+    if (pc == IDLE_PRIORITY_CLASS || pc == BELOW_NORMAL_PRIORITY_CLASS)
+        SetPriorityClass(proc, NORMAL_PRIORITY_CLASS);
+}
+
+bool detect_engine_match_snapshot() {
+    const DWORD selfPid = GetCurrentProcessId();
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE)
+        return false;
+
+    struct ProcEntry {
+        DWORD        pid;
+        DWORD        parentPid;
+        std::wstring exeLower;
+    };
+    std::vector<ProcEntry> procs;
+    DWORD                  parentPid = 0;
+
+    PROCESSENTRY32W e{};
+    e.dwSize = sizeof(e);
+    for (BOOL ok = Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e))
+    {
+        if (e.th32ProcessID == selfPid)
+            parentPid = e.th32ParentProcessID;
+        procs.push_back({e.th32ProcessID, e.th32ParentProcessID, lower(e.szExeFile)});
+    }
+    CloseHandle(snap);
+
+    if (parentPid == 0)
+        return false;
+
+    std::wstring parentExe;
+    for (const auto& p : procs)
+        if (p.pid == parentPid)
+        {
+            parentExe = p.exeLower;
+            break;
+        }
+
+    if (parentExe.empty())
+        return false;
+
+    // 1. Dedicated match / league manager parent.
+    if (league_parent_name(parentExe))
+        return true;
+
+    // 2. Never scan siblings of system shells (explorer, cmd, powershell...).
+    if (shell_parent_name(parentExe))
+        return false;
+
+    // 3. Collect candidate sibling processes under the same GUI parent.
+    std::vector<DWORD> candidates;
+    for (const auto& p : procs)
+    {
+        if (p.parentPid != parentPid || p.pid == selfPid)
+            continue;
+        if (non_engine_sibling_name(p.exeLower))
+            continue;
+        candidates.push_back(p.pid);
+    }
+    if (candidates.empty())
+        return false;
+
+    // Filter out siblings that own a visible top-level window (GUI popups, etc.).
+    std::vector<DWORD> windowed;
+    if (user32().ok())
+    {
+        user32().enumWindows(collect_window_pid, reinterpret_cast<LPARAM>(&windowed));
+        std::sort(windowed.begin(), windowed.end());
+    }
+
+    const std::vector<BYTE> selfUser = token_user(GetCurrentProcess());
+    for (DWORD pid : candidates)
+    {
+        if (std::binary_search(windowed.begin(), windowed.end(), pid))
+            continue;
+
+        HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!h)
+            continue;
+
+        const bool sameU  = selfUser.empty() || same_user(token_user(h), selfUser);
+        const auto path   = image_path(h);
+        CloseHandle(h);
+
+        if (sameU && !path.empty() && !is_system_dir_path(path))
+            return true;
+    }
+
+    return false;
+}
+
+}  // namespace
+
+bool is_engine_match() { return engineMatchLatched.load(std::memory_order_relaxed); }
+
+bool real_play_active() { return realPlayTuningActive.load(std::memory_order_relaxed); }
+
+bool refresh_engine_match_mode() {
+    if (!engineMatchLatched.load(std::memory_order_relaxed) && detect_engine_match_snapshot())
+    {
+        engineMatchLatched.store(true, std::memory_order_relaxed);
+
+        // If this process had previously entered real-play tuning and later
+        // transitioned into an engine match, undo our own power plan and High priority.
+        if (realPlayTuningActive.exchange(false, std::memory_order_relaxed))
+        {
+            release_power_plan();
+            HANDLE proc = GetCurrentProcess();
+            if (GetPriorityClass(proc) == HIGH_PRIORITY_CLASS)
+                SetPriorityClass(proc, NORMAL_PRIORITY_CLASS);
+        }
+    }
+
+    if (engineMatchLatched.load(std::memory_order_relaxed))
+    {
+        ensure_normal_priority_if_lowered();
+        return true;
+    }
+    return false;
+}
+
+bool prepare_for_search() {
+    if (refresh_engine_match_mode())
+        return true;
+
+    const bool firstRealPlay = !realPlayTuningActive.exchange(true, std::memory_order_relaxed);
+    acquire_power_plan();
+    apply_process_tuning();
+    if (firstRealPlay)
+    {
+        idle_other_pikafish();
+        boost_chess_guis();
+    }
+    return false;
+}
+
 std::vector<int> plan_physical_core_pins(std::size_t threads) {
     DWORD len = 0;
     GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
@@ -887,6 +1091,58 @@ std::vector<int> plan_physical_core_pins(std::size_t threads) {
     }
 
     return select_physical_cores(std::move(cores), threads);
+}
+
+std::vector<int> plan_all_logical_cpus(std::size_t threads) {
+    if (threads == 0)
+        return {};
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || len == 0)
+        return {};
+    std::vector<char> buf(len);
+    auto* base = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data());
+    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, base, &len))
+        return {};
+
+    DWORD_PTR procMask = 0, sysMask = 0;
+    bool      filter = GetProcessAffinityMask(GetCurrentProcess(), &procMask, &sysMask) != 0;
+    USHORT    groups[64]{};
+    USHORT    groupCount = 64;
+    WORD      procGroup  = 0;
+    if (filter && GetProcessGroupAffinity(GetCurrentProcess(), &groupCount, groups))
+    {
+        if (groupCount > 1)
+            filter = false;
+        else if (groupCount == 1)
+            procGroup = groups[0];
+    }
+
+    std::vector<int> cpus;
+    for (DWORD off = 0; off < len;)
+    {
+        auto* info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data() + off);
+        off += info->Size;
+        if (info->Relationship != RelationProcessorCore || info->Processor.GroupCount == 0)
+            continue;
+
+        const GROUP_AFFINITY& ga   = info->Processor.GroupMask[0];
+        KAFFINITY             mask = ga.Mask;
+        if (filter)
+            mask = ga.Group == procGroup ? mask & KAFFINITY(procMask) : 0;
+        for (int bit = 0; mask; ++bit, mask >>= 1)
+            if (mask & 1)
+                cpus.push_back(int(ga.Group) * 64 + bit);
+    }
+
+    if (cpus.empty())
+        return {};
+    std::sort(cpus.begin(), cpus.end());
+    std::vector<int> result;
+    result.reserve(threads);
+    for (std::size_t i = 0; i < threads; ++i)
+        result.push_back(cpus[i % cpus.size()]);
+    return result;
 }
 
 bool pin_current_thread(int cpu) {

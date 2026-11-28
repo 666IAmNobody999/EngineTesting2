@@ -66,8 +66,9 @@ int main(int argc, char* argv[]) {
             std::cout << to_output_codepage(HS_STR("info string [授权状态] ") + auth_msg) << std::endl;
     }
 
-    // Windows: "幻神终极效能" power plan while the engine runs.
-    WinPerf::acquire_power_plan();
+    // Windows: power plan ("幻神终极效能") is acquired lazily on the first real-play
+    // search in WinPerf::prepare_for_search() so same-machine engine matches / leagues
+    // never alter the system power plan.
 
     // Windows: make sure Large Pages can be used ("Lock pages in memory").
     WinPerf::ensure_lock_pages_right();

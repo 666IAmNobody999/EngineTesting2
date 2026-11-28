@@ -213,6 +213,7 @@ enum class AttackMode {
 // extra line happens through the normal principal variation search of the next
 // iteration, which is the only sound judge between scores of different depths.
 enum class SearchAlgorithm {
+    ORIGINAL,
     IMPROVED_MULTIPV3,
     IMPROVED_MULTIPV2
 };

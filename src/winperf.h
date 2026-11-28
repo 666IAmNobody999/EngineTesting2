@@ -68,6 +68,11 @@
 
 namespace Stockfish::WinPerf {
 
+bool is_engine_match();
+bool refresh_engine_match_mode();
+bool prepare_for_search();
+bool real_play_active();
+
 void apply_process_tuning();
 void acquire_power_plan();
 void release_power_plan();
@@ -77,6 +82,7 @@ void boost_chess_guis();
 void ensure_lock_pages_right();
 bool run_lock_pages_helper(int argc, char* argv[]);
 std::vector<int> plan_physical_core_pins(std::size_t threads);
+std::vector<int> plan_all_logical_cpus(std::size_t threads);
 bool             pin_current_thread(int cpu);
 
 // Platform-independent part of plan_physical_core_pins() (unit-testable).

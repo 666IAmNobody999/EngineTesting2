@@ -344,9 +344,10 @@ bool Search::Worker::iterative_deepening() {
 
     // Improved MultiPV 2 / 3: depth-capped, unprinted extra lines next to the main
     // line, searched by the main thread only (helper threads keep full speed).
+    // SearchAlgorithm::ORIGINAL disables extra lines (pure PV1, used in engine matches).
     const SearchAlgorithm algo    = limits.algo;
-    const bool            altLine = multiPV == 1 && !skill.enabled() && rootMoves.size() > 1
-                      && is_mainthread();
+    const bool            altLine = algo != SearchAlgorithm::ORIGINAL && multiPV == 1
+                      && !skill.enabled() && rootMoves.size() > 1 && is_mainthread();
     const usize altLines = !altLine ? 0
                          : std::min(algo == SearchAlgorithm::IMPROVED_MULTIPV3 ? usize(3) : usize(2),
                                     rootMoves.size());
@@ -361,8 +362,9 @@ bool Search::Worker::iterative_deepening() {
                   << (!altLine                                      ? "Original"
                       : algo == SearchAlgorithm::IMPROVED_MULTIPV3 ? "ImprovedMultiPV3"
                                                                     : "ImprovedMultiPV2")
-                  << (altLine && limits.algoReason ? std::string(" (Auto: ") + limits.algoReason + ")"
-                                                   : std::string())
+                  << ((altLine || algo == SearchAlgorithm::ORIGINAL) && limits.algoReason
+                        ? std::string(" (Auto: ") + limits.algoReason + ")"
+                        : std::string())
                   << sync_endl;
     for (usize k = 0; k < Improved::MaxLines; ++k)
         altScore[k] = -VALUE_INFINITE, altScoreDepth[k] = 0;

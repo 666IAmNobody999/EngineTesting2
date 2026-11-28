@@ -55,15 +55,6 @@ namespace Stockfish {
 
 namespace {
 
-// Windows process tuning (CPU priority "High", I/O priority "High",
-// memory priority "Normal", dynamic thread priority boost on); see winperf.h.
-// GUIs usually create the engine with their own priority setting, and some of
-// them re-apply it later, so this is called both at start-up and before every
-// search; the last writer wins and the engine makes sure it is the last one.
-// On non-Windows platforms raising priority needs elevated rights, so it is a
-// no-op there.
-void force_process_priority() { WinPerf::apply_process_tuning(); }
-
 // NumaPolicy is a combo option; map its (case-insensitive) value to the exact
 // lower-case name used by the NUMA code. Anything unexpected falls back to auto.
 std::string numa_policy_name(const Option& o) {
@@ -595,9 +586,6 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
     RuleConfig::rule60MaxPly       = int(options["Rule60MaxPly"]);
     RuleConfig::refresh_rule60();
 
-    force_process_priority();
-    idle_other_pikafish();
-
     threads.clear();
     threads.ensure_network_replicated();
     resize_threads();
@@ -613,7 +601,6 @@ void Engine::go(Search::LimitsType& limits) {
     assert(limits.perft == 0);
     killer_check_join();
     verify_network();
-    force_process_priority();  // re-assert in case the GUI changed it after launch
 
     std::string auth_msg;
     if (!HWIDLock::is_authorized(std::string(options["License Key"]), &auth_msg))
@@ -622,6 +609,10 @@ void Engine::go(Search::LimitsType& limits) {
         sync_cout << HS_STR("bestmove (none)") << sync_endl;
         return;
     }
+
+    if (!limits.forceImproved)
+        WinPerf::prepare_for_search();
+    threads.sync_core_pins();
 
     choose_search_algorithm(limits);
     avoid_sixty_move_draw(limits);
@@ -912,7 +903,9 @@ void Engine::choose_search_algorithm(Search::LimitsType& limits) {
     // 1 minute game without increment.
     RuleConfig::skySearchChase = analysis || (ponder && !fastMove && !oneMinute);
 
-    if (analysis)
+    if (WinPerf::is_engine_match())
+        limits.algo = SearchAlgorithm::ORIGINAL, limits.algoReason = "Engine Match";
+    else if (analysis)
         limits.algo = SearchAlgorithm::IMPROVED_MULTIPV3, limits.algoReason = "Analysis";
     else if (blitz)
         limits.algo = SearchAlgorithm::IMPROVED_MULTIPV2, limits.algoReason = "Blitz";
@@ -1036,6 +1029,8 @@ void Engine::stop() {
 // window, name with "chess", "象棋", "ethinker", "pengfei" ...) get "High".
 // Called at start-up, isready and ucinewgame.
 void Engine::idle_other_pikafish() const {
+    if (WinPerf::refresh_engine_match_mode() || !WinPerf::real_play_active())
+        return;
     WinPerf::idle_other_pikafish();
     WinPerf::boost_chess_guis();
 }

@@ -257,25 +257,52 @@ void ThreadPool::set(const NumaConfig&                           numaConfig,
                 create_thread();
         }
 
-        // Windows: when the threads fit on the physical cores, give each one its
-        // own core as ideal processor (one logical processor per core, so no two
-        // search threads prefer the same core through SMT). Soft hint only. Only with the default NumaPolicy
-        // "auto" when no NUMA binding is in use; "none" disables it.
-        if (numaPolicy == "auto" && !doBindThreads)
-        {
-            corePins = WinPerf::plan_physical_core_pins(requested);
-            for (usize i = 0; i < corePins.size(); ++i)
-            {
-                const int cpu = corePins[i];
-                threads[i]->run_custom_job([cpu]() { WinPerf::pin_current_thread(cpu); });
-                threads[i]->wait_for_search_finished();
-            }
-        }
+        // Windows: defer physical-core ideal-processor hints until the first search
+        // (sync_core_pins) so same-machine engine matches / leagues never call
+        // SetThreadIdealProcessorEx and keep default Windows scheduling.
+        corePins.clear();
+        corePinsApplied = false;
+        allowCorePins   = (numaPolicy == "auto" && !doBindThreads);
 
         clear();
 
         main_thread()->wait_for_search_finished();
     }
+}
+
+void ThreadPool::sync_core_pins() {
+    if (threads.empty())
+        return;
+
+    if (WinPerf::is_engine_match())
+    {
+        if (corePinsApplied)
+        {
+            const auto allCpus = WinPerf::plan_all_logical_cpus(threads.size());
+            for (usize i = 0; i < allCpus.size() && i < threads.size(); ++i)
+            {
+                const int cpu = allCpus[i];
+                threads[i]->run_custom_job([cpu]() { WinPerf::pin_current_thread(cpu); });
+                threads[i]->wait_for_search_finished();
+            }
+            corePins.clear();
+            corePinsApplied = false;
+        }
+        allowCorePins = false;
+        return;
+    }
+
+    if (!allowCorePins || corePinsApplied)
+        return;
+
+    corePins = WinPerf::plan_physical_core_pins(threads.size());
+    for (usize i = 0; i < corePins.size() && i < threads.size(); ++i)
+    {
+        const int cpu = corePins[i];
+        threads[i]->run_custom_job([cpu]() { WinPerf::pin_current_thread(cpu); });
+        threads[i]->wait_for_search_finished();
+    }
+    corePinsApplied = !corePins.empty();
 }
 
 
