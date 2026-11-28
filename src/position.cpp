@@ -1705,24 +1705,23 @@ inline int sky_mutual_run(int runA, int limA, int runB, int limB) {
     }
 }
 
-inline int sky_check_limit(bool repeat, u16 ids) {
+inline int sky_check_limit(u16 ids) {
     const u16 rest = ids & u16(ids - 1);  // ids without its lowest piece
-    return repeat || !rest ? 6 : (rest & u16(rest - 1)) ? 18 : 12;
+    return !rest ? 6 : (rest & u16(rest - 1)) ? 18 : 12;
 }
 
 struct SkyCounters {
     u8   chaseCnt[16] = {};
+    u8   pieceCheckCnt[16] = {};
     int  checkRun = 0, killCnt = 0, alt = 0;
-    u16  altIds = 0, checkIds = 0, lastCheckers = 0;
-    bool checkRepeat = false;
+    u16  altIds = 0, checkIds = 0;
     bool altCheck = false, altChase = false;
 
     void reset_all() { *this = SkyCounters{}; }
     void clear_checks() {
-        checkRun     = 0;
-        checkIds     = 0;
-        lastCheckers = 0;
-        checkRepeat  = false;
+        std::memset(pieceCheckCnt, 0, sizeof(pieceCheckCnt));
+        checkRun = 0;
+        checkIds = 0;
     }
 
     // Counts one own move; true when it exceeds one of the counters.
@@ -1736,10 +1735,18 @@ struct SkyCounters {
         if (r.check)
         {
             std::memset(chaseCnt, 0, sizeof(chaseCnt));
-            checkRepeat |= bool(r.checkers & lastCheckers);
-            lastCheckers = r.checkers;
+            for (int id = 0; id < 16; ++id)
+            {
+                if (r.checkers >> id & 1)
+                {
+                    if (++pieceCheckCnt[id] > 6)
+                        exceeded = true;
+                }
+                else
+                    pieceCheckCnt[id] = 0;
+            }
             checkIds |= r.checkers;
-            exceeded |= ++checkRun > sky_check_limit(checkRepeat, checkIds);
+            exceeded |= ++checkRun > sky_check_limit(checkIds);
             ++alt;
             altIds |= r.checkers | r.altCheckers;
             altCheck = true;
@@ -2058,7 +2065,8 @@ int Position::sky_check_run_limit(bool prev) const {
         checked = ~checked;
     }
     const int run = std::min(int(p->skyCheckRun), 18);
-    u16       ids = 0, newer = 0;
+    u16       ids = 0, common = 0xFFFF;
+    u8        pieceRun[16] = {};
     for (int k = 0; k < run; ++k)
     {
         u16      cur = 0;
@@ -2067,10 +2075,18 @@ int Position::sky_check_run_limit(bool prev) const {
             cur |= u16(1u << (id[sky_check_owner(pop_lsb(b), ksq[checked], p->move.to_sq(),
                                                  p->checkersBB)]
                               & 15));
-        if (cur & newer)
-            return 6;  // 一子长将
+        for (int i = 0; i < 16; ++i)
+        {
+            if (cur >> i & 1)
+            {
+                if (++pieceRun[i] > 6)
+                    return 6;  // 同一子连续将军超过 6 回合（一子长将）
+            }
+            else
+                pieceRun[i] = 0;
+        }
         ids |= cur;
-        newer = cur;
+        common &= cur;
         if (k + 1 == run)
             break;
         for (int j = 0; j < 2; ++j)
@@ -2082,7 +2098,11 @@ int Position::sky_check_run_limit(bool prev) const {
             p = p->previous;
         }
     }
-    return sky_check_limit(false, ids);
+    // If a single piece checked on every move of a 6-check run (e.g. mutual check),
+    // its next check would be its 7th consecutive check -> limit is 6.
+    if (run >= 6 && common)
+        return 6;
+    return sky_check_limit(ids);
 }
 
 

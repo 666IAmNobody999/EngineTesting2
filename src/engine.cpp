@@ -473,6 +473,7 @@ Engine::Engine(std::optional<std::filesystem::path> path) :
                  }
 
                  RuleConfig::refresh_rule60();
+                 search_clear();
 
                  return std::nullopt;
              }));
